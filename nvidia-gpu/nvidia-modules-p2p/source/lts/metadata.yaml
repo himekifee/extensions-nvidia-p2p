@@ -1,0 +1,17 @@
+upstream:
+  repository: https://github.com/NVIDIA/open-gpu-kernel-modules
+  release: 580.105.08
+  releaseURL: https://github.com/NVIDIA/open-gpu-kernel-modules/releases/tag/580.105.08
+  tagObject: 590a0d10eb164d49550673ba6d6b6b70951cc6df
+patchSource:
+  repository: https://github.com/aikitoria/open-gpu-kernel-modules
+  branch: 580.105.08-p2p
+  lineage: donor patch rebased onto its native NVIDIA 580.105.08 LTS base
+  baseCommit: 2af9f1f0f7de4988432d4ae875b5858ffdb09cc2
+  patchCommit: 510a7720de1e7fa3ef374a721b48f700b23895b9
+  branchHeadCommit: 7e392c1e0b8e2e8e82958d9d17ba3a0721551a2a
+  compareDiffURL: https://github.com/aikitoria/open-gpu-kernel-modules/compare/2af9f1f0f7de4988432d4ae875b5858ffdb09cc2...510a7720de1e7fa3ef374a721b48f700b23895b9.diff
+notes:
+  - Keep userspace/toolkit on the stock official 580.105.08 LTS track.
+  - Limit customizations to the kernel modules side plus the existing same-key installer flow.
+  - Revalidate patch application against 580.105.08 before publishing images.

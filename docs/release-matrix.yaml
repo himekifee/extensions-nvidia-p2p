@@ -1,0 +1,70 @@
+schemaVersion: 1
+# baseGpuNode and baseGpuNodeInternalIP: set these to your target GPU node's
+# Kubernetes node name and internal IP before running operational commands.
+baseGpuNode: <gpu-node-name>
+baseGpuNodeInternalIP: <gpu-node-ip>
+targetTalosVersion: v1.12.6
+targetTalosMinor: v1.12
+kernelVersion: 6.18.18-talos
+kubernetesVersion: v1.32.5
+kubernetesMinor: v1.32
+arch: amd64
+osImage: Talos (v1.12.6)
+nvidia:
+  selectedTrack: lts
+  selectedTrackReason: The donor patch now rides on the stock 580.105.08 LTS family, so stock userspace and toolkit stay on the official 580.105.08 Talos LTS artifacts while the Talos v1.12.6 kernel and installer flow stays unchanged.
+  upstreamOpenModuleTag: 580.105.08
+  upstreamOpenModuleSource:
+    repository: https://github.com/NVIDIA/open-gpu-kernel-modules
+    release: 580.105.08
+    releaseURL: https://github.com/NVIDIA/open-gpu-kernel-modules/releases/tag/580.105.08
+    commit: 2af9f1f0f7de4988432d4ae875b5858ffdb09cc2
+  donorPatchSource:
+    repository: https://github.com/aikitoria/open-gpu-kernel-modules
+    branch: 580.105.08-p2p
+    donorBaseRelease: 580.105.08
+    lineage: Donor patch rebased onto its native NVIDIA 580.105.08 LTS base; stock userspace and toolkit follow the official 580.105.08 Talos LTS artifacts while the Talos v1.12.6 build flow stays unchanged.
+    baseCommit: 2af9f1f0f7de4988432d4ae875b5858ffdb09cc2
+    patchCommit: 510a7720de1e7fa3ef374a721b48f700b23895b9
+    branchHeadCommit: 7e392c1e0b8e2e8e82958d9d17ba3a0721551a2a
+    compareDiffURL: https://github.com/aikitoria/open-gpu-kernel-modules/compare/2af9f1f0f7de4988432d4ae875b5858ffdb09cc2...510a7720de1e7fa3ef374a721b48f700b23895b9.diff
+  officialOpenModuleExtension:
+    name: siderolabs/nvidia-open-gpu-kernel-modules-lts
+    ref: ghcr.io/siderolabs/nvidia-open-gpu-kernel-modules-lts:580.105.08-v1.12.0
+    digest: sha256:aa769308b09815c604d4f445357256762c6ecfea60e5b902320193326f4a37af
+  officialUserspaceToolkitExtension:
+    name: siderolabs/nvidia-container-toolkit-lts
+    ref: ghcr.io/siderolabs/nvidia-container-toolkit-lts:580.105.08-v1.18.1
+    digest: sha256:3c367715634984f4e4299f38897b5aca4e46bf1430996b49c3829733b0497d7c
+    track: lts
+    driverFamilyBranch: "580"
+    sourceRepository: https://github.com/siderolabs/extensions
+artifacts:
+  currentRollbackInstallerImage:
+    ref: factory.talos.dev/installer/383ff20982d317df4085095c792d4927aa9cc88c56d7f67242f8c91d8e6b3142:v1.12.6
+    discoverableFrom: talosctl get machineconfig -n <gpu-node-ip> -o yaml
+  customKernelImage: ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver/kernel:v1.12.6-nvidia-580.105.08-g1b4b9cac381f-20260331101529@sha256:d4528f928927b4117171bdbe62ca9f5ff34f7b4fc0c217a257c9650362e47bee
+  customKernelDigest: sha256:d4528f928927b4117171bdbe62ca9f5ff34f7b4fc0c217a257c9650362e47bee
+  customPkgImage: ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver/nvidia-modules-p2p-lts-pkg:v1.12.6-nvidia-580.105.08-g1b4b9cac381f-20260331101529@sha256:5c584ff52b2273243f71820ebf1ced71cadc690a0c3a016ebb86800f8a6da0ad
+  customPkgDigest: sha256:5c584ff52b2273243f71820ebf1ced71cadc690a0c3a016ebb86800f8a6da0ad
+  customSysextImage: ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver/nvidia-modules-p2p-lts:v1.12.6-nvidia-580.105.08-g1b4b9cac381f-20260401034448@sha256:4ccc0723bee8f984ceec19ed8f3046d9026b06d92b46108fabf18344ec6de666
+  customSysextDigest: sha256:4ccc0723bee8f984ceec19ed8f3046d9026b06d92b46108fabf18344ec6de666
+  customInstallerBaseImage: ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver/installer-base:v1.12.6-nvidia-580.105.08-g1b4b9cac381f-20260331101529@sha256:ee8eb249b36ca2cbb3fe605455f929d58f2805417ece9704f96694ac54402ca4
+  customInstallerBaseDigest: sha256:ee8eb249b36ca2cbb3fe605455f929d58f2805417ece9704f96694ac54402ca4
+  customInstallerImage: ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver/nvidia-open-gpu-kernel-modules-p2p-installer:v1.12.6-nvidia-580.105.08-g1b4b9cac381f-20260401034448@sha256:944e2096b3c09d00e79a973bca41c2971124d4f02e22da988f72eb8518149cd5
+  customInstallerDigest: sha256:944e2096b3c09d00e79a973bca41c2971124d4f02e22da988f72eb8518149cd5
+abortConditions:
+  - code: donor_patch_no_longer_ports_cleanly
+    stopWhen: The aikitoria donor diff no longer applies cleanly on top of the selected NVIDIA open kernel modules 580.105.08 LTS base.
+  - code: stock_toolkit_track_mismatch
+    stopWhen: The official nvidia-container-toolkit-lts metadata no longer matches the selected 580.105.08 LTS driver family while targeting Talos v1.12.6.
+  - code: missing_rollback_image
+    stopWhen: No currently deployable rollback installer image is pinned for the target GPU node before build or upgrade work starts.
+verification:
+  matrixValidationCommand: bash hack/p2p/check-matrix.sh docs/release-matrix.yaml
+  donorPatchValidationCommand: bash hack/p2p/check-patch-apply.sh docs/release-matrix.yaml
+  userspaceTrackValidationCommand: bash hack/p2p/check-userspace-track.sh docs/release-matrix.yaml
+  rollbackImageDiscoveryCommand: talosctl get machineconfig -n <gpu-node-ip> -o yaml
+repository:
+  origin: himekifee/talos-tinygrad-nvidia-p2p-driver
+  upstream: siderolabs/extensions

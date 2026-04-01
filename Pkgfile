@@ -3,6 +3,12 @@
 format: v1alpha2
 
 vars:
+  kspp_ref: e354f6ab5279f9cfa8bfdd7e13e454ccf69209f9
+  kspp_sha256: 640b25473f86557d082f680b0f57653a69f4146e97825673bf582f9a4c8b7739
+  kspp_sha512: 82dae1debbe94a3f82766a8cdbfe59ff8698d433175803458499b76c50b47b89e9280b677a9f16b2a44711badd6f4001aba951a41722a74dd51c03a18b8b9219
+  linux_version: 6.18.18
+  linux_sha256: f4855f382c1b735c84072bdef36db5bcd5dc7b0c37e42f5104317149a0a486ef
+  linux_sha512: 822877e5bcf330752a8c5ececac54e547ebbcd4e9025d0c37880c313d712ddda0df28ace858db4582a3fd3cf82d7c90a3c157a9a7561017d558231e9bd73c180
   CONTAINERD_VERSION: v2.2.2 # update this when updating PKGS_VERSION in Makefile
   LINUX_FIRMWARE_VERSION: "20260309" # update this when updating PKGS_VERSION in Makefile
   DRBD_DRIVER_VERSION: 9.3.1 # update this when updating PKGS_VERSION in Makefile

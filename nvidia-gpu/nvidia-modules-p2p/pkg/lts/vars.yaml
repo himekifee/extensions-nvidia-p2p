@@ -1,0 +1,2 @@
+VERSION: "{{ .NVIDIA_DRIVER_LTS_VERSION }}-p2p-{{ .BUILD_ARG_TAG }}"
+TIER: "core"

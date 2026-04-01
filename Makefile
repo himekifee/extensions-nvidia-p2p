@@ -1,6 +1,6 @@
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2026-03-17T18:42:59Z by kres 3675077.
+# Generated on 2026-03-28T22:09:41Z by kres 3675077.
 
 # common variables
 
@@ -21,8 +21,8 @@ CONFORMANCE_IMAGE ?= ghcr.io/siderolabs/conform:latest
 
 # source date epoch of first commit
 
-INITIAL_COMMIT_SHA := $(shell git rev-list --max-parents=0 HEAD)
-SOURCE_DATE_EPOCH := $(shell git log $(INITIAL_COMMIT_SHA) --pretty=%ct)
+INITIAL_COMMIT_SHA ?= $(shell git rev-list --max-parents=0 HEAD 2>/dev/null)
+SOURCE_DATE_EPOCH ?= $(shell if test -n "$(INITIAL_COMMIT_SHA)"; then git log "$(INITIAL_COMMIT_SHA)" --pretty=%ct 2>/dev/null; else stat -c %Y Pkgfile 2>/dev/null || date +%s; fi)
 
 # sync bldr image with pkgfile
 
@@ -54,9 +54,9 @@ COMMON_ARGS += $(BUILD_ARGS)
 # extra variables
 
 EXTENSIONS_IMAGE_REF ?= $(REGISTRY_AND_USERNAME)/extensions:$(TAG)
-PKGS ?= v1.13.0-beta.0
+PKGS ?= v1.12.0-50-ga92bed5
 PKGS_PREFIX ?= ghcr.io/siderolabs
-TOOLS ?= v1.13.0-beta.0
+TOOLS ?= v1.12.0-7-g57916cb
 TOOLS_PREFIX ?= ghcr.io/siderolabs
 IMAGE_SIGNER_RELEASE ?= v0.2.0
 
@@ -109,6 +109,7 @@ TARGETS += nvidia-container-toolkit-production
 TARGETS += nvidia-fabricmanager-lts
 TARGETS += nvidia-fabricmanager-production
 TARGETS += nvidia-gdrdrv-device
+TARGETS += nvidia-modules-p2p-lts
 TARGETS += nvidia-open-gpu-kernel-modules-lts
 TARGETS += nvidia-open-gpu-kernel-modules-production
 TARGETS += nvme-cli
@@ -313,4 +314,3 @@ release-notes: $(ARTIFACTS)
 conformance:
 	@docker pull $(CONFORMANCE_IMAGE)
 	@docker run --rm -it -v $(PWD):/src -w /src $(CONFORMANCE_IMAGE) enforce
-

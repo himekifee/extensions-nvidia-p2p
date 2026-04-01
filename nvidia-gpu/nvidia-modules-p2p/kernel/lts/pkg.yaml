@@ -1,0 +1,136 @@
+name: nvidia-modules-p2p-lts-pkg
+variant: scratch
+shell: /bin/bash
+dependencies:
+  - stage: base
+  - stage: kernel-build
+steps:
+  - sources:
+    # {{ if eq .ARCH "aarch64" }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+      - url: https://developer.download.nvidia.com/compute/nvidia-driver/redist/nvidia_driver/linux-sbsa/nvidia_driver-linux-sbsa-{{ .NVIDIA_DRIVER_LTS_VERSION }}-archive.tar.xz
+        destination: nvidia.tar.xz
+        sha256: "{{ .NVIDIA_PKGS_LTS_ARM64_SHA256 }}"
+        sha512: "{{ .NVIDIA_PKGS_LTS_ARM64_SHA512 }}"
+    # {{ else }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+      - url: https://developer.download.nvidia.com/compute/nvidia-driver/redist/nvidia_driver/linux-x86_64/nvidia_driver-linux-x86_64-{{ .NVIDIA_DRIVER_LTS_VERSION }}-archive.tar.xz
+        destination: nvidia.tar.xz
+        sha256: "{{ .NVIDIA_PKGS_LTS_AMD64_SHA256 }}"
+        sha512: "{{ .NVIDIA_PKGS_LTS_AMD64_SHA512 }}"
+    # {{ end }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+      - url: https://github.com/aikitoria/open-gpu-kernel-modules/compare/2af9f1f0f7de4988432d4ae875b5858ffdb09cc2...510a7720de1e7fa3ef374a721b48f700b23895b9.diff
+        destination: p2p.diff
+        sha256: "73e58fd269b0aadb4186a4ce37112cd7c2f876b5b5926df13b5e246ce4a525d7"
+        sha512: "e09d4edf3d841227957bc3e1f3a5a4953ab6ba550282dcb9d71ccac2186f01dca903e4369cf192f879d7069777adb275ed1e196fc07c733476f1f2dc63fc727c"
+      - url: https://github.com/NVIDIA/gdrcopy/archive/refs/tags/{{ .GDRCOPY_VERSION }}.tar.gz
+        destination: gdrcopy.tar.gz
+        sha256: "{{ .GDRCOPY_SHA256 }}"
+        sha512: "{{ .GDRCOPY_SHA512 }}"
+    env:
+      ARCH: '{{ if eq .ARCH "aarch64"}}arm64{{ else if eq .ARCH "x86_64" }}x86_64{{ else }}unsupported{{ end }}'
+      UPSTREAM_OPEN_MODULE_TAG: '{{ .NVIDIA_DRIVER_LTS_VERSION }}'
+      P2P_SOURCE_RELEASE: 580.105.08-p2p
+      UPSTREAM_BASE_COMMIT: 2af9f1f0f7de4988432d4ae875b5858ffdb09cc2
+      P2P_HEAD_COMMIT: 510a7720de1e7fa3ef374a721b48f700b23895b9
+      P2P_COMPARE_DIFF_URL: https://github.com/aikitoria/open-gpu-kernel-modules/compare/2af9f1f0f7de4988432d4ae875b5858ffdb09cc2...510a7720de1e7fa3ef374a721b48f700b23895b9.diff
+    prepare:
+      - |
+        printf 'p2p upstream tag: %s\n' "${UPSTREAM_OPEN_MODULE_TAG}"
+        printf 'p2p donor release: %s\n' "${P2P_SOURCE_RELEASE}"
+        printf 'p2p donor base: %s\n' "${UPSTREAM_BASE_COMMIT}"
+        printf 'p2p donor head: %s\n' "${P2P_HEAD_COMMIT}"
+        printf 'p2p compare diff: %s\n' "${P2P_COMPARE_DIFF_URL}"
+        mkdir -p /nvidia-driver
+        tar xf nvidia.tar.xz -C /nvidia-driver --strip-components=1
+        python3 - <<'PY'
+        import re
+        from pathlib import Path
+        src = Path('p2p.diff')
+        dst = Path('p2p-redist.diff')
+        text = src.read_text()
+        text = re.sub(r'^(diff --git a/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        text = re.sub(r'^(diff --git a/[^ ]+ b/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        text = re.sub(r'^(--- a/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        text = re.sub(r'^(\+\+\+ b/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        dst.write_text(text)
+        PY
+        git -C /nvidia-driver init
+        git -C /nvidia-driver apply --check "$(pwd)/p2p-redist.diff"
+        git -C /nvidia-driver apply "$(pwd)/p2p-redist.diff"
+        python3 - <<'PY'
+        from pathlib import Path
+
+        path = Path('/nvidia-driver/src/kernel-module-source/src/nvidia/src/kernel/gpu/bus/kern_bus.c')
+        text = path.read_text()
+        old = '        pKernelBus->staticBar1ForceType = NV_REG_STR_RM_FORCE_STATIC_BAR1_AUTO;\n'
+        new = '        pKernelBus->staticBar1ForceType = NV_REG_STR_RM_FORCE_STATIC_BAR1_ENABLE;\n'
+
+        if new in text:
+            raise SystemExit('static BAR1 force is already enabled in kern_bus.c')
+
+        if old not in text:
+            raise SystemExit('expected static BAR1 AUTO assignment not found in kern_bus.c')
+
+        path.write_text(text.replace(old, new, 1))
+        PY
+        python3 - <<'PY'
+        from pathlib import Path
+
+        def replace_once(path_str: str, old: str, new: str) -> None:
+            path = Path(path_str)
+            text = path.read_text()
+            if new in text:
+                raise SystemExit(f'patch already applied in {path_str}')
+            if old not in text:
+                raise SystemExit(f'expected snippet not found in {path_str}')
+            path.write_text(text.replace(old, new, 1))
+
+        # Fix get_dev_pagemap() signature for Linux 6.18+.
+        # Kernel commit torvalds/linux@328ad07 removed the second argument.
+        # NVIDIA 580.105.08 calls get_dev_pagemap(pfn, NULL) but 6.18+ expects
+        # get_dev_pagemap(pfn). The NULL pgmap arg was unused, so dropping it
+        # is safe and matches upstream kernel API.
+        replace_once(
+            '/nvidia-driver/kernel-open/nvidia-uvm/uvm_va_range_device_p2p.c',
+            '            get_dev_pagemap(page_to_pfn(page), NULL);\n',
+            '            get_dev_pagemap(page_to_pfn(page));\n',
+        )
+        PY
+      - |
+        mkdir -p /gdrcopy
+        tar xf gdrcopy.tar.gz -C /gdrcopy --strip-components=1
+    build:
+      - |
+        cd /nvidia-driver/kernel-open
+
+        make -j $(nproc) SYSSRC=/src
+      - |
+        cd /gdrcopy/src/gdrdrv
+
+        make -C /src M=/gdrcopy/src/gdrdrv modules \
+          NVIDIA_SRC_DIR=/nvidia-driver/kernel-open/nvidia \
+          NVIDIA_IS_OPENSOURCE=y \
+          HAVE_VM_FLAGS_SET=y \
+          HAVE_PROC_OPS=y \
+          KDIR=/src
+    install:
+      - |
+        cd /nvidia-driver/kernel-open
+
+        mkdir -p /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+        cp /src/modules.order /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+        cp /src/modules.builtin /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+        cp /src/modules.builtin.modinfo /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+
+        make -j $(nproc) modules_install SYSSRC=/src INSTALL_MOD_PATH=/rootfs/usr INSTALL_MOD_STRIP=1
+      - |
+        cd /gdrcopy
+
+        make -C /src M=/gdrcopy/src/gdrdrv modules_install INSTALL_MOD_PATH=/rootfs/usr INSTALL_MOD_DIR=extras INSTALL_MOD_STRIP=1
+    test:
+      - |
+        find /rootfs/usr/lib/modules -name '*.ko' -exec grep -FL '~Module signature appended~' {} \+
+      - |
+        fhs-validator /rootfs
+finalize:
+  - from: /rootfs
+    to: /

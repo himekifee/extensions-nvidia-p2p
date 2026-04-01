@@ -1,0 +1,70 @@
+name: kernel-build
+variant: scratch
+shell: /bin/bash
+dependencies:
+  - stage: kernel-prepare
+steps:
+  - env:
+      CARCH: '{{ if eq .ARCH "aarch64"}}arm64{{ else if eq .ARCH "x86_64" }}amd64{{ else }}unsupported{{ end }}'
+      ARCH: '{{ if eq .ARCH "aarch64"}}arm64{{ else if eq .ARCH "x86_64" }}x86{{ else }}unsupported{{ end }}'
+      MODULE_SIG_KEY_PEM_B64: '{{ .BUILD_ARG_MODULE_SIG_KEY_PEM_B64 }}'
+    prepare:
+      - |
+        cd /src
+        cp -v /pkg/config-${CARCH} .config
+        cp -v /pkg/certs/* certs/
+        python3 - <<'PY'
+        import base64
+        import os
+        from pathlib import Path
+
+        encoded = os.environ.get("MODULE_SIG_KEY_PEM_B64", "")
+        if not encoded.strip():
+            raise SystemExit(0)
+
+        pem = base64.b64decode("".join(encoded.split()), validate=True)
+        if b"BEGIN" not in pem:
+            raise SystemExit("decoded module signing key does not look like PEM data")
+
+        path = Path("/src/certs/shared_signing_key.pem")
+        path.write_bytes(pem)
+        path.chmod(0o600)
+
+        config_path = Path("/src/.config")
+        config_text = config_path.read_text()
+        old = 'CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"'
+        new = 'CONFIG_MODULE_SIG_KEY="certs/shared_signing_key.pem"'
+
+        if old in config_text:
+            config_text = config_text.replace(old, new, 1)
+        elif new not in config_text:
+            raise SystemExit("CONFIG_MODULE_SIG_KEY was not found in kernel config")
+
+        config_path.write_text(config_text)
+        print(f"using shared module signing key from build arg: {path}")
+        PY
+      - |
+        cd /src
+        for patch in $(find /pkg/patches -type f -name "*.patch" | sort); do
+          patch -p1 < $patch || (echo "Failed to apply patch $patch" && exit 1)
+          echo "Applied patch $patch"
+        done
+    build:
+      - |
+        cd /src
+        python3 /toolchain/kernel-hardening-checker/bin/kernel-hardening-checker -c .config -m json | python3 /pkg/scripts/filter-hardened-check.py ${CARCH}
+      - |
+        cd /src
+
+        make -j $(nproc)
+        make -j $(nproc) modules
+
+        if [[ "${ARCH}" == "arm64" ]]; then
+          echo "Compiling device-tree blobs"
+          make -j $(nproc) DTC_FLAGS=-@ dtbs
+        fi
+finalize:
+  - from: /src
+    to: /src
+  - from: /toolchain
+    to: /toolchain

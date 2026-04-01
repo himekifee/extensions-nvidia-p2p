@@ -29,9 +29,9 @@ newt: 1.10.0
 fuse3: 3.18.1
 qemu-guest-agent: 10.2.0
 Linux Firmware: 20260309
-NVIDIA LTS: 580.126.20
+NVIDIA LTS: 580.105.08
 NVIDIA Production: 570.211.01
-nvidia-container-toolkit: v1.19.0
+nvidia-container-toolkit: v1.18.1
 DRBD: 9.3.1
 gvisor: 20260309.0
 Kata containers: 3.26.0
@@ -48,7 +48,7 @@ Intel ucode: 20260227
 ZFS: 2.4.1
 lldpd: 1.0.21
 px-fuse: 4b7ade7d7a4afe10b87ff7a16a59e9d1e3fae68f
-gdrcopy: v2.5.2
+gdrcopy: v2.5.1
 """
 
 [make_deps]

@@ -1,237 +1,139 @@
-# THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
-#
-# Generated on 2026-03-10T16:54:00Z by kres e68c408.
+name: ci
 
 concurrency:
-  group: ${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-"on":
-  push:
-    branches:
-      - main
-      - release-*
-    tags:
-      - v*
+
+on:
   pull_request:
     branches:
       - main
-      - release-*
-name: default
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
-  default:
-    permissions:
-      actions: read
-      contents: write
-      issues: read
-      packages: write
-      pull-requests: read
-    runs-on:
-      group: pkgs
-    if: (!startsWith(github.head_ref, 'renovate/') && !startsWith(github.head_ref, 'dependabot/'))
-    outputs:
-      labels: ${{ steps.retrieve-pr-labels.outputs.result }}
+  build:
+    if: (!startsWith(github.head_ref || '', 'renovate/') && !startsWith(github.head_ref || '', 'dependabot/'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      MATRIX_PATH: docs/release-matrix.yaml
+      PLATFORM: linux/amd64
     steps:
-      - name: gather-system-info
-        id: system-info
-        uses: kenchan0130/actions-system-info@59699597e84e80085a750998045983daa49274c4 # version: v1.4.0
-        continue-on-error: true
-      - name: print-system-info
-        run: |
-          MEMORY_GB=$((${{ steps.system-info.outputs.totalmem }}/1024/1024/1024))
-
-          OUTPUTS=(
-            "CPU Core: ${{ steps.system-info.outputs.cpu-core }}"
-            "CPU Model: ${{ steps.system-info.outputs.cpu-model }}"
-            "Hostname: ${{ steps.system-info.outputs.hostname }}"
-            "NodeName: ${NODE_NAME}"
-            "Kernel release: ${{ steps.system-info.outputs.kernel-release }}"
-            "Kernel version: ${{ steps.system-info.outputs.kernel-version }}"
-            "Name: ${{ steps.system-info.outputs.name }}"
-            "Platform: ${{ steps.system-info.outputs.platform }}"
-            "Release: ${{ steps.system-info.outputs.release }}"
-            "Total memory: ${MEMORY_GB} GB"
-          )
-
-          for OUTPUT in "${OUTPUTS[@]}";do
-            echo "${OUTPUT}"
-          done
-        continue-on-error: true
       - name: checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # version: v6.0.2
-      - name: Unshallow
-        run: |
-          git fetch --prune --unshallow
-      - name: Set up Docker Buildx
-        id: setup-buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # version: v4.0.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          append: |
-            - endpoint: tcp://buildkit-arm64.ci.svc.cluster.local:1234
-              platforms: linux/arm64
-          driver: remote
-          endpoint: tcp://buildkit-amd64.ci.svc.cluster.local:1234
-      - name: Build
-        if: github.event_name == 'pull_request'
-        run: |
-          make
-      - name: Build nonfree
-        if: github.event_name == 'pull_request'
-        run: |
-          make nonfree
-      - name: Login to registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # version: v4.0.0
+          fetch-depth: 0
+
+      - name: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
-          password: ${{ secrets.GITHUB_TOKEN }}
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-      - name: Push to registry
-        if: github.event_name != 'pull_request'
-        run: |
-          make  PUSH=true
-      - name: Push nonfree
-        if: github.event_name != 'pull_request'
-        run: |
-          make nonfree PUSH=true
-      - name: Retrieve PR labels
-        id: retrieve-pr-labels
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # version: v8.0.0
-        with:
-          retries: "3"
-          script: |
-            if (context.eventName != "pull_request") { return "[]" }
+          python-version: "3.12"
 
-            const resp = await github.rest.issues.get({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-            })
+      - name: install-python-dependencies
+        run: |
+          python3 -m pip install --user PyYAML
 
-            return resp.data.labels.map(label => label.name)
-      - name: extensions
-        if: github.event_name != 'pull_request'
-        env:
-          PUSH: "true"
-        run: |
-          make extensions
-      - name: extensions-catalog
-        if: github.event_name == 'pull_request'
-        run: |
-          make extensions-catalog
-      - name: check-dirty
-        if: github.event_name == 'pull_request'
-        run: |
-          make check-dirty
-      - name: release-notes
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          make release-notes
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # version: v2.5.0
-        with:
-          body_path: _out/RELEASE_NOTES.md
-          draft: "true"
-  grype-scan:
-    runs-on:
-      group: pkgs
-    if: contains(fromJSON(needs.default.outputs.labels), 'integration/grype')
-    needs:
-      - default
-    steps:
-      - name: gather-system-info
-        id: system-info
-        uses: kenchan0130/actions-system-info@59699597e84e80085a750998045983daa49274c4 # version: v1.4.0
-        continue-on-error: true
-      - name: print-system-info
-        run: |
-          MEMORY_GB=$((${{ steps.system-info.outputs.totalmem }}/1024/1024/1024))
+      - name: set-up-docker-buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
 
-          OUTPUTS=(
-            "CPU Core: ${{ steps.system-info.outputs.cpu-core }}"
-            "CPU Model: ${{ steps.system-info.outputs.cpu-model }}"
-            "Hostname: ${{ steps.system-info.outputs.hostname }}"
-            "NodeName: ${NODE_NAME}"
-            "Kernel release: ${{ steps.system-info.outputs.kernel-release }}"
-            "Kernel version: ${{ steps.system-info.outputs.kernel-version }}"
-            "Name: ${{ steps.system-info.outputs.name }}"
-            "Platform: ${{ steps.system-info.outputs.platform }}"
-            "Release: ${{ steps.system-info.outputs.release }}"
-            "Total memory: ${MEMORY_GB} GB"
-          )
+      - name: derive-build-refs
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
 
-          for OUTPUT in "${OUTPUTS[@]}";do
-            echo "${OUTPUT}"
+          import yaml
+
+          root = Path('.')
+          matrix = yaml.safe_load((root / os.environ['MATRIX_PATH']).read_text(encoding='utf-8'))
+
+          talos_version = matrix['targetTalosVersion'].strip()
+          driver_version = matrix['nvidia']['upstreamOpenModuleTag'].strip()
+          short_sha = subprocess.check_output(
+              ['git', 'rev-parse', '--short=12', 'HEAD'],
+              text=True,
+          ).strip()
+          source_date_epoch = subprocess.check_output(
+              ['git', 'log', '-1', '--pretty=%ct', 'HEAD'],
+              text=True,
+          ).strip()
+
+          def sanitize(tag: str) -> str:
+              cleaned = re.sub(r'[^0-9A-Za-z._-]+', '-', tag.strip())
+              cleaned = re.sub(r'-+', '-', cleaned).strip('-.')
+              if not cleaned:
+                  raise SystemExit('derived tag was empty after sanitization')
+              return cleaned
+
+          release_tag = sanitize(f'{talos_version}-nvidia-{driver_version}-g{short_sha}')
+          build_tag = sanitize(f'{talos_version}-g{short_sha}')
+          image_prefix = 'ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver'
+
+          refs = {
+              'SOURCE_DATE_EPOCH': source_date_epoch,
+              'RELEASE_TAG': release_tag,
+              'BUILD_TAG': build_tag,
+              'KERNEL_IMAGE': f'{image_prefix}/kernel:{release_tag}',
+              'P2P_PKG_IMAGE': f'{image_prefix}/nvidia-modules-p2p-lts-pkg:{release_tag}',
+          }
+
+          github_env = Path(os.environ['GITHUB_ENV'])
+          with github_env.open('a', encoding='utf-8') as stream:
+              for key, value in refs.items():
+                  stream.write(f'{key}={value}\n')
+          PY
+
+      - name: validate-local-inputs
+        run: |
+          for cmd in base64 curl docker git grep make mktemp modinfo objcopy objdump openssl patch python3 tar xz zstd; do
+            command -v "$cmd" >/dev/null
           done
-        continue-on-error: true
-      - name: checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # version: v6.0.2
-      - name: Unshallow
-        run: |
-          git fetch --prune --unshallow
-      - name: Set up Docker Buildx
-        id: setup-buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # version: v4.0.0
-        with:
-          driver: remote
-          endpoint: tcp://buildkit-amd64.ci.svc.cluster.local:1234
-        timeout-minutes: 10
-      - name: grype-scan
-        run: |
-          make grype-scan
-      - name: save-results-artifacts
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # version: v7.0.0
-        with:
-          name: results-grype-scan
-          path: _out/grype-scan/**
-          retention-days: "180"
-  reproducibility:
-    runs-on:
-      group: pkgs
-    if: contains(fromJSON(needs.default.outputs.labels), 'integration/reproducibility')
-    needs:
-      - default
-    steps:
-      - name: gather-system-info
-        id: system-info
-        uses: kenchan0130/actions-system-info@59699597e84e80085a750998045983daa49274c4 # version: v1.4.0
-        continue-on-error: true
-      - name: print-system-info
-        run: |
-          MEMORY_GB=$((${{ steps.system-info.outputs.totalmem }}/1024/1024/1024))
 
-          OUTPUTS=(
-            "CPU Core: ${{ steps.system-info.outputs.cpu-core }}"
-            "CPU Model: ${{ steps.system-info.outputs.cpu-model }}"
-            "Hostname: ${{ steps.system-info.outputs.hostname }}"
-            "NodeName: ${NODE_NAME}"
-            "Kernel release: ${{ steps.system-info.outputs.kernel-release }}"
-            "Kernel version: ${{ steps.system-info.outputs.kernel-version }}"
-            "Name: ${{ steps.system-info.outputs.name }}"
-            "Platform: ${{ steps.system-info.outputs.platform }}"
-            "Release: ${{ steps.system-info.outputs.release }}"
-            "Total memory: ${MEMORY_GB} GB"
-          )
-
-          for OUTPUT in "${OUTPUTS[@]}";do
-            echo "${OUTPUT}"
+          for path in \
+            "$MATRIX_PATH" \
+            hack/p2p/check-matrix.sh \
+            hack/p2p/check-patch-apply.sh \
+            hack/p2p/check-userspace-track.sh \
+            hack/p2p/generate-module-signing-key.sh \
+            hack/p2p/verify-same-signing-key.sh \
+            kernel/kernel/pkg.yaml \
+            nvidia-gpu/nvidia-modules-p2p/kernel/lts/pkg.yaml; do
+            test -e "$path"
           done
-        continue-on-error: true
-      - name: checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # version: v6.0.2
-      - name: Unshallow
+
+      - name: validate-release-matrix-and-build-inputs
         run: |
-          git fetch --prune --unshallow
-      - name: Set up Docker Buildx
-        id: setup-buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # version: v4.0.0
-        with:
-          append: |
-            - endpoint: tcp://buildkit-arm64.ci.svc.cluster.local:1234
-              platforms: linux/arm64
-          driver: remote
-          endpoint: tcp://buildkit-amd64.ci.svc.cluster.local:1234
-      - name: reproducibility-test
+          bash hack/p2p/check-matrix.sh "$MATRIX_PATH"
+          bash hack/p2p/check-patch-apply.sh "$MATRIX_PATH"
+          bash hack/p2p/check-userspace-track.sh "$MATRIX_PATH"
+
+      - name: generate-shared-module-signing-key
         run: |
-          make reproducibility-test
+          echo "MODULE_SIG_KEY_PEM_B64=$(bash hack/p2p/generate-module-signing-key.sh)" >> "$GITHUB_ENV"
+
+      - name: build-samekey-kernel
+        run: |
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+          make target-kernel \
+            PLATFORM="$PLATFORM" \
+            PROGRESS=plain \
+            TAG="$BUILD_TAG" \
+            TARGET_ARGS="--build-arg=MODULE_SIG_KEY_PEM_B64=${MODULE_SIG_KEY_PEM_B64} --tag=${KERNEL_IMAGE} --load"
+
+      - name: build-p2p-pkg
+        run: |
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+          make target-nvidia-modules-p2p-lts-pkg \
+            PLATFORM="$PLATFORM" \
+            PROGRESS=plain \
+            TAG="$BUILD_TAG" \
+            TARGET_ARGS="--build-arg=MODULE_SIG_KEY_PEM_B64=${MODULE_SIG_KEY_PEM_B64} --tag=${P2P_PKG_IMAGE} --load"
+
+      - name: verify-shared-module-signing-key
+        run: |
+          bash hack/p2p/verify-same-signing-key.sh "$KERNEL_IMAGE" "$P2P_PKG_IMAGE"

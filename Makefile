@@ -21,8 +21,8 @@ CONFORMANCE_IMAGE ?= ghcr.io/siderolabs/conform:latest
 
 # source date epoch of first commit
 
-INITIAL_COMMIT_SHA := $(shell git rev-list --max-parents=0 HEAD)
-SOURCE_DATE_EPOCH := $(shell git log $(INITIAL_COMMIT_SHA) --pretty=%ct)
+INITIAL_COMMIT_SHA ?= $(shell git rev-list --max-parents=0 HEAD 2>/dev/null)
+SOURCE_DATE_EPOCH ?= $(shell if test -n "$(INITIAL_COMMIT_SHA)"; then git log "$(INITIAL_COMMIT_SHA)" --pretty=%ct 2>/dev/null; else stat -c %Y Pkgfile 2>/dev/null || date +%s; fi)
 
 # sync bldr image with pkgfile
 
@@ -109,6 +109,7 @@ TARGETS += nvidia-container-toolkit-production
 TARGETS += nvidia-fabricmanager-lts
 TARGETS += nvidia-fabricmanager-production
 TARGETS += nvidia-gdrdrv-device
+TARGETS += nvidia-modules-p2p-production
 TARGETS += nvidia-open-gpu-kernel-modules-lts
 TARGETS += nvidia-open-gpu-kernel-modules-production
 TARGETS += nvme-cli
@@ -313,4 +314,3 @@ release-notes: $(ARTIFACTS)
 conformance:
 	@docker pull $(CONFORMANCE_IMAGE)
 	@docker run --rm -it -v $(PWD):/src -w /src $(CONFORMANCE_IMAGE) enforce
-

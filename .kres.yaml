@@ -51,6 +51,7 @@ spec:
     - nvidia-fabricmanager-lts
     - nvidia-fabricmanager-production
     - nvidia-gdrdrv-device
+    - nvidia-modules-p2p-production
     - nvidia-open-gpu-kernel-modules-lts
     - nvidia-open-gpu-kernel-modules-production
     - nvme-cli
@@ -90,6 +91,7 @@ spec:
   extraBuildArgs:
     - TAG
     - PKGS
+    - MODULE_SIG_KEY_PEM_B64
     - PKGS_PREFIX
     - TOOLS
     - TOOLS_PREFIX

@@ -90,6 +90,10 @@ steps:
         # run ldconfig to update the cache
         /rootfs/usr/local/glibc/sbin/ldconfig -r /rootfs
 
+        # NVIDIA Container Toolkit JIT CDI library discovery reads /etc/ld.so.cache.
+        mkdir -p /rootfs/etc
+        cp /rootfs/usr/local/glibc/etc/ld.so.cache /rootfs/etc/ld.so.cache
+
         mkdir -p /rootfs/usr/local/lib/containers/nvidia-persistenced \
           /rootfs/usr/local/etc/containers \
           /rootfs/usr/lib/udev/rules.d

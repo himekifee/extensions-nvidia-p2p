@@ -1,0 +1,17 @@
+upstream:
+  repository: https://github.com/NVIDIA/open-gpu-kernel-modules
+  release: 595.58.03
+  releaseURL: https://github.com/NVIDIA/open-gpu-kernel-modules/releases/tag/595.58.03
+  tagObject: a801124e06b48ecb672d8d5c9407fc056d063b04
+patchSource:
+  repository: https://github.com/aikitoria/open-gpu-kernel-modules
+  branch: 595.58.03-p2p
+  lineage: donor patch rebased onto its native NVIDIA 595.58.03 production base
+  baseCommit: db0c4e65c8e34c678d745ddb1317f53f90d1072b
+  patchCommit: 2b75b4991f506526ff6dbd179d61e5f8797ebb15
+  branchHeadCommit: 6dd6ba34a4abfb3761797b26102094b856b01edd
+  compareDiffURL: https://github.com/aikitoria/open-gpu-kernel-modules/compare/db0c4e65c8e34c678d745ddb1317f53f90d1072b...2b75b4991f506526ff6dbd179d61e5f8797ebb15.diff
+notes:
+  - Keep userspace/toolkit on the stock official 595.58.03 production track.
+  - Limit customizations to the kernel modules side plus the existing same-key installer flow.
+  - Revalidate patch application against 595.58.03 before publishing images.

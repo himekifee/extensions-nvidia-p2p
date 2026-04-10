@@ -1,0 +1,14 @@
+sourceOfTruth: local
+customWork:
+  scripts:
+    root: hack/p2p
+  nvidiaP2P:
+    root: nvidia-gpu/nvidia-modules-p2p
+    structure:
+      source: donor patch metadata and provenance
+      kernel: build definitions for module pkg images
+      pkg: Talos system extension manifests and package definitions
+notes:
+  - Keep upstream Talos extension layout intact where possible.
+  - Keep userspace/toolkit close to the official selected NVIDIA track.
+  - Keep customizations isolated to the P2P module flow.

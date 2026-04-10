@@ -1,0 +1,70 @@
+schemaVersion: 1
+# baseGpuNode and baseGpuNodeInternalIP: set these to your target GPU node's
+# Kubernetes node name and internal IP before running operational commands.
+baseGpuNode: <gpu-node-name>
+baseGpuNodeInternalIP: <gpu-node-ip>
+targetTalosVersion: v1.13.0-beta.1
+targetTalosMinor: v1.13
+kernelVersion: 6.18.19-talos
+kubernetesVersion: v1.36.0-beta.0
+kubernetesMinor: v1.36
+arch: amd64
+osImage: Talos (v1.13.0-beta.1)
+nvidia:
+  selectedTrack: production
+  selectedTrackReason: The donor patch now rides on the stock 595.58.03 production family, so stock userspace and toolkit stay on the official 595.58.03 Talos production artifacts while the Talos v1.13.0-beta.1 kernel and installer flow stays unchanged.
+  upstreamOpenModuleTag: 595.58.03
+  upstreamOpenModuleSource:
+    repository: https://github.com/NVIDIA/open-gpu-kernel-modules
+    release: 595.58.03
+    releaseURL: https://github.com/NVIDIA/open-gpu-kernel-modules/releases/tag/595.58.03
+    commit: db0c4e65c8e34c678d745ddb1317f53f90d1072b
+  donorPatchSource:
+    repository: https://github.com/aikitoria/open-gpu-kernel-modules
+    branch: 595.58.03-p2p
+    donorBaseRelease: 595.58.03
+    lineage: Donor patch rebased onto its native NVIDIA 595.58.03 production base; stock userspace and toolkit follow the official 595.58.03 Talos production artifacts while the Talos v1.13.0-beta.1 build flow stays unchanged.
+    baseCommit: db0c4e65c8e34c678d745ddb1317f53f90d1072b
+    patchCommit: 2b75b4991f506526ff6dbd179d61e5f8797ebb15
+    branchHeadCommit: 6dd6ba34a4abfb3761797b26102094b856b01edd
+    compareDiffURL: https://github.com/aikitoria/open-gpu-kernel-modules/compare/db0c4e65c8e34c678d745ddb1317f53f90d1072b...2b75b4991f506526ff6dbd179d61e5f8797ebb15.diff
+  officialOpenModuleExtension:
+    name: siderolabs/nvidia-open-gpu-kernel-modules-production
+    ref: ghcr.io/siderolabs/nvidia-open-gpu-kernel-modules-production:595.58.03-v1.13.0-beta.1
+    digest: sha256:92961aefa1f61a185cf14b6878b3f5d818f0cc6bd631094cbb07c26cb68c332f
+  officialUserspaceToolkitExtension:
+    name: siderolabs/nvidia-container-toolkit-production
+    ref: ghcr.io/siderolabs/nvidia-container-toolkit-production:595.58.03-v1.19.0
+    digest: sha256:95039cbda2db18ec8bb5581eb55737af49be0ca0537df3f9b7db6aa916fcd5c6
+    track: production
+    driverFamilyBranch: "595"
+    sourceRepository: https://github.com/siderolabs/extensions
+artifacts:
+  currentRollbackInstallerImage:
+    ref: factory.talos.dev/installer/383ff20982d317df4085095c792d4927aa9cc88c56d7f67242f8c91d8e6b3142:v1.12.6
+    discoverableFrom: talosctl get machineconfig -n <gpu-node-ip> -o yaml
+  customKernelImage: null
+  customKernelDigest: null
+  customPkgImage: null
+  customPkgDigest: null
+  customSysextImage: null
+  customSysextDigest: null
+  customInstallerBaseImage: null
+  customInstallerBaseDigest: null
+  customInstallerImage: null
+  customInstallerDigest: null
+abortConditions:
+  - code: donor_patch_no_longer_ports_cleanly
+    stopWhen: The aikitoria donor diff no longer applies cleanly on top of the selected NVIDIA open kernel modules 595.58.03 production base.
+  - code: stock_toolkit_track_mismatch
+    stopWhen: The official nvidia-container-toolkit-production metadata no longer matches the selected 595.58.03 production driver family while targeting Talos v1.13.0-beta.1.
+  - code: missing_rollback_image
+    stopWhen: No currently deployable rollback installer image is pinned for the target GPU node before build or upgrade work starts.
+verification:
+  matrixValidationCommand: bash hack/p2p/check-matrix.sh docs/release-matrix.yaml
+  donorPatchValidationCommand: bash hack/p2p/check-patch-apply.sh docs/release-matrix.yaml
+  userspaceTrackValidationCommand: bash hack/p2p/check-userspace-track.sh docs/release-matrix.yaml
+  rollbackImageDiscoveryCommand: talosctl get machineconfig -n <gpu-node-ip> -o yaml
+repository:
+  origin: himekifee/talos-tinygrad-nvidia-p2p-driver
+  upstream: siderolabs/extensions

@@ -1,0 +1,727 @@
+name: publish-p2p-installer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner label for the full publish path
+        required: true
+        default: ubuntu-24.04
+        type: string
+      publish_namespace:
+        description: Base GHCR namespace for custom publish artifacts
+        required: true
+        default: ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver
+        type: string
+      image_tag:
+        description: Optional override for published image tags
+        required: false
+        type: string
+      build_tag:
+        description: Optional override for build metadata tag passed into make
+        required: false
+        type: string
+
+concurrency:
+  group: publish-p2p-installer-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Phase 1: Build all base images locally ──────────────────────────
+  # Builds kernel, installer-base, and p2p-pkg without pushing.
+  # Images are saved as artifacts so downstream push jobs can retry
+  # independently without rebuilding.
+  build:
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 300
+    env:
+      MATRIX_PATH: docs/release-matrix.yaml
+      PUBLISH_NAMESPACE: ${{ github.event.inputs.publish_namespace || 'ghcr.io/himekifee/talos-tinygrad-nvidia-p2p-driver' }}
+      INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag || '' }}
+      INPUT_BUILD_TAG: ${{ github.event.inputs.build_tag || '' }}
+    steps:
+      - name: gather-system-info
+        id: system-info
+        uses: kenchan0130/actions-system-info@59699597e84e80085a750998045983daa49274c4
+        continue-on-error: true
+
+      - name: print-system-info
+        continue-on-error: true
+        run: |
+          MEMORY_GB=$((${{ steps.system-info.outputs.totalmem }}/1024/1024/1024))
+
+          OUTPUTS=(
+            "CPU Core: ${{ steps.system-info.outputs.cpu-core }}"
+            "CPU Model: ${{ steps.system-info.outputs.cpu-model }}"
+            "Hostname: ${{ steps.system-info.outputs.hostname }}"
+            "NodeName: ${NODE_NAME}"
+            "Kernel release: ${{ steps.system-info.outputs.kernel-release }}"
+            "Kernel version: ${{ steps.system-info.outputs.kernel-version }}"
+            "Name: ${{ steps.system-info.outputs.name }}"
+            "Platform: ${{ steps.system-info.outputs.platform }}"
+            "Release: ${{ steps.system-info.outputs.release }}"
+            "Total memory: ${MEMORY_GB} GB"
+          )
+
+          for OUTPUT in "${OUTPUTS[@]}"; do
+            echo "${OUTPUT}"
+          done
+
+      - name: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: fetch-full-history
+        run: |
+          git fetch --prune --tags --unshallow || git fetch --prune --tags
+
+      - name: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: install-python-dependencies
+        run: |
+          python3 -m pip install --user PyYAML
+
+      - name: set-up-docker-buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
+
+      - name: login-to-ghcr
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: derive-publish-refs
+        id: derive
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          import yaml
+
+          root = Path(".")
+          pkgfile = yaml.safe_load((root / "Pkgfile").read_text(encoding="utf-8"))
+          matrix = yaml.safe_load((root / os.environ["MATRIX_PATH"]).read_text(encoding="utf-8"))
+          misc_vars = yaml.safe_load((root / "misc/vars.yaml").read_text(encoding="utf-8"))
+          storage_vars = yaml.safe_load((root / "storage/vars.yaml").read_text(encoding="utf-8"))
+          guest_agent_vars = yaml.safe_load((root / "guest-agents/vars.yaml").read_text(encoding="utf-8"))
+
+          talos_version = matrix["targetTalosVersion"].strip()
+          driver_version = matrix["nvidia"]["upstreamOpenModuleTag"].strip()
+          arch = matrix["arch"].strip()
+          publish_namespace = os.environ["PUBLISH_NAMESPACE"].strip().rstrip("/")
+          short_sha = subprocess.check_output(
+              ["git", "rev-parse", "--short=12", "HEAD"],
+              text=True,
+          ).strip()
+          source_date_epoch = subprocess.check_output(
+              ["git", "log", "-1", "--pretty=%ct", "HEAD"],
+              text=True,
+          ).strip()
+
+          def sanitize(tag: str) -> str:
+              cleaned = re.sub(r"[^0-9A-Za-z._-]+", "-", tag.strip())
+              cleaned = re.sub(r"-+", "-", cleaned).strip("-.")
+              if not cleaned:
+                  raise SystemExit("derived tag was empty after sanitization")
+              return cleaned
+
+          release_tag = sanitize(
+              os.environ.get("INPUT_IMAGE_TAG", "")
+              or f"{talos_version}-nvidia-{driver_version}-g{short_sha}"
+          )
+          build_tag = sanitize(
+              os.environ.get("INPUT_BUILD_TAG", "")
+              or f"{talos_version}-g{short_sha}"
+          )
+
+          platform_map = {
+              "amd64": "linux/amd64",
+              "arm64": "linux/arm64",
+          }
+          if arch not in platform_map:
+              raise SystemExit(f"unsupported release-matrix arch for CI workflow: {arch}")
+
+          extra_extensions = [
+              f"ghcr.io/siderolabs/glibc:{misc_vars['GLIBC_VERSION']}",
+              f"ghcr.io/siderolabs/binfmt-misc:{talos_version}",
+              f"ghcr.io/siderolabs/btrfs:{talos_version}",
+              f"ghcr.io/siderolabs/fuse3:{storage_vars['FUSE3_VERSION']}",
+              f"ghcr.io/siderolabs/qemu-guest-agent:{guest_agent_vars['QEMU_VERSION']}",
+              f"ghcr.io/siderolabs/util-linux-tools:{pkgfile['vars']['UTIL_LINUX_VERSION']}",
+          ]
+
+          refs = {
+              "ARCH": arch,
+              "PLATFORM": platform_map[arch],
+              "TALOS_VERSION": talos_version,
+              "DRIVER_VERSION": driver_version,
+              "SOURCE_DATE_EPOCH": source_date_epoch,
+              "RELEASE_TAG": release_tag,
+              "BUILD_TAG": build_tag,
+              "CUSTOM_PKG_TAG": release_tag,
+              "KERNEL_IMAGE": f"{publish_namespace}/kernel:{release_tag}",
+              "INSTALLER_BASE_IMAGE": f"{publish_namespace}/installer-base:{release_tag}",
+              "P2P_PKG_IMAGE": f"{publish_namespace}/nvidia-modules-p2p-production-pkg:{release_tag}",
+              "P2P_SYSEXT_IMAGE": f"{publish_namespace}/nvidia-modules-p2p-production:{release_tag}",
+              "TOOLKIT_SYSEXT_IMAGE": f"{publish_namespace}/nvidia-container-toolkit-production:{release_tag}",
+              "INSTALLER_IMAGE_REPO": f"{publish_namespace}/nvidia-open-gpu-kernel-modules-p2p-installer",
+              "INSTALLER_IMAGE": f"{publish_namespace}/nvidia-open-gpu-kernel-modules-p2p-installer:{release_tag}",
+              "EXTRA_SYSTEM_EXTENSION_IMAGES": ",".join(extra_extensions),
+          }
+
+          github_env = Path(os.environ["GITHUB_ENV"])
+          with github_env.open("a", encoding="utf-8") as stream:
+              for key, value in refs.items():
+                  stream.write(f"{key}={value}\n")
+          PY
+
+      - name: validate-local-inputs
+        run: |
+          for cmd in base64 curl docker git grep make mktemp modinfo objcopy objdump openssl patch python3 tar xz zstd; do
+            command -v "$cmd" >/dev/null
+          done
+
+          for path in \
+            "$MATRIX_PATH" \
+            hack/p2p/build-installer.sh \
+            hack/p2p/build-samekey-installer-base.py \
+            kernel/kernel/pkg.yaml \
+            nvidia-gpu/nvidia-modules-p2p/kernel/production/pkg.yaml \
+            nvidia-gpu/nvidia-modules-p2p/pkg/production/pkg.yaml; do
+            test -e "$path"
+          done
+
+      - name: validate-release-matrix-and-track
+        run: |
+          bash hack/p2p/check-matrix.sh "$MATRIX_PATH"
+          bash hack/p2p/check-patch-apply.sh "$MATRIX_PATH"
+          bash hack/p2p/check-userspace-track.sh "$MATRIX_PATH"
+
+      - name: generate-shared-module-signing-key
+        run: |
+          echo "MODULE_SIG_KEY_PEM_B64=$(bash hack/p2p/generate-module-signing-key.sh)" >> "$GITHUB_ENV"
+
+      - name: build-samekey-kernel
+        run: |
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+          make target-kernel \
+            PLATFORM="$PLATFORM" \
+            PROGRESS=plain \
+            TAG="$BUILD_TAG" \
+            TARGET_ARGS="--build-arg=MODULE_SIG_KEY_PEM_B64=${MODULE_SIG_KEY_PEM_B64} --tag=${KERNEL_IMAGE} --load"
+
+      - name: build-samekey-installer-base
+        run: |
+          SAMEKEY_KERNEL_IMAGE="$KERNEL_IMAGE" \
+          OUTPUT_IMAGE="$INSTALLER_BASE_IMAGE" \
+          PUSH_OUTPUT=false \
+          python3 hack/p2p/build-samekey-installer-base.py
+          docker image inspect "$INSTALLER_BASE_IMAGE" >/dev/null
+
+      - name: build-p2p-pkg
+        run: |
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+          make target-nvidia-modules-p2p-production-pkg \
+            PLATFORM="$PLATFORM" \
+            PROGRESS=plain \
+            TAG="$BUILD_TAG" \
+            TARGET_ARGS="--build-arg=MODULE_SIG_KEY_PEM_B64=${MODULE_SIG_KEY_PEM_B64} --tag=${P2P_PKG_IMAGE} --load"
+
+      - name: verify-shared-module-signing-key
+        run: |
+          bash hack/p2p/verify-same-signing-key.sh "$KERNEL_IMAGE" "$P2P_PKG_IMAGE"
+
+      - name: export-build-refs
+        run: |
+          {
+            echo "MATRIX_PATH=${MATRIX_PATH}"
+            echo "PUBLISH_NAMESPACE=${PUBLISH_NAMESPACE}"
+            echo "ARCH=${ARCH}"
+            echo "PLATFORM=${PLATFORM}"
+            echo "TALOS_VERSION=${TALOS_VERSION}"
+            echo "DRIVER_VERSION=${DRIVER_VERSION}"
+            echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
+            echo "RELEASE_TAG=${RELEASE_TAG}"
+            echo "BUILD_TAG=${BUILD_TAG}"
+            echo "CUSTOM_PKG_TAG=${CUSTOM_PKG_TAG}"
+            echo "KERNEL_IMAGE=${KERNEL_IMAGE}"
+            echo "INSTALLER_BASE_IMAGE=${INSTALLER_BASE_IMAGE}"
+            echo "P2P_PKG_IMAGE=${P2P_PKG_IMAGE}"
+            echo "P2P_SYSEXT_IMAGE=${P2P_SYSEXT_IMAGE}"
+            echo "TOOLKIT_SYSEXT_IMAGE=${TOOLKIT_SYSEXT_IMAGE}"
+            echo "INSTALLER_IMAGE_REPO=${INSTALLER_IMAGE_REPO}"
+            echo "INSTALLER_IMAGE=${INSTALLER_IMAGE}"
+            echo "EXTRA_SYSTEM_EXTENSION_IMAGES=${EXTRA_SYSTEM_EXTENSION_IMAGES}"
+          } > /tmp/build-refs.env
+
+      - name: build-toolkit-sysext
+        run: |
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+          make target-nvidia-container-toolkit-production \
+            PLATFORM="$PLATFORM" \
+            PROGRESS=plain \
+            TAG="$BUILD_TAG" \
+            TARGET_ARGS="--tag=${TOOLKIT_SYSEXT_IMAGE} --load"
+
+      - name: save-base-images
+        run: |
+          mkdir -p /tmp/images
+          docker save "$KERNEL_IMAGE" | zstd -T0 -3 > /tmp/images/kernel.tar.zst
+          docker save "$INSTALLER_BASE_IMAGE" | zstd -T0 -3 > /tmp/images/installer-base.tar.zst
+          docker save "$P2P_PKG_IMAGE" | zstd -T0 -3 > /tmp/images/p2p-pkg.tar.zst
+          docker save "$TOOLKIT_SYSEXT_IMAGE" | zstd -T0 -3 > /tmp/images/toolkit-sysext.tar.zst
+
+      - name: upload-build-refs
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-refs
+          path: /tmp/build-refs.env
+          retention-days: 1
+
+      - name: upload-base-images
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-images
+          path: /tmp/images/
+          retention-days: 1
+          compression-level: 0
+
+  # ── Phase 2: Push base images to registry ───────────────────────────
+  # Re-runnable independently: downloads saved images from artifacts and
+  # pushes them. No rebuild required on transient push failures.
+  push-base:
+    needs: [build]
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - name: login-to-ghcr
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download-build-refs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-refs
+
+      - name: load-build-refs
+        run: |
+          cat build-refs.env >> "$GITHUB_ENV"
+
+      - name: download-base-images
+        uses: actions/download-artifact@v4
+        with:
+          name: base-images
+          path: /tmp/images/
+
+      - name: load-images
+        run: |
+          zstd -d -c /tmp/images/kernel.tar.zst | docker load
+          zstd -d -c /tmp/images/installer-base.tar.zst | docker load
+          zstd -d -c /tmp/images/p2p-pkg.tar.zst | docker load
+          zstd -d -c /tmp/images/toolkit-sysext.tar.zst | docker load
+
+      - name: push-samekey-kernel
+        run: |
+          docker push "$KERNEL_IMAGE"
+
+      - name: push-samekey-installer-base
+        run: |
+          docker push "$INSTALLER_BASE_IMAGE"
+
+      - name: push-p2p-pkg
+        run: |
+          docker push "$P2P_PKG_IMAGE"
+
+      - name: push-toolkit-sysext
+        run: |
+          docker push "$TOOLKIT_SYSEXT_IMAGE"
+
+  # ── Phase 3: Build sysext (needs p2p-pkg from registry) ────────────
+  build-sysext:
+    needs: [push-base]
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    steps:
+      - name: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: fetch-full-history
+        run: |
+          git fetch --prune --tags --unshallow || git fetch --prune --tags
+
+      - name: set-up-docker-buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
+
+      - name: login-to-ghcr
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download-build-refs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-refs
+
+      - name: load-build-refs
+        run: |
+          cat build-refs.env >> "$GITHUB_ENV"
+
+      - name: build-p2p-sysext
+        run: |
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+          make target-nvidia-modules-p2p-production \
+            PLATFORM="$PLATFORM" \
+            PROGRESS=plain \
+            TAG="$BUILD_TAG" \
+            PKGS="$CUSTOM_PKG_TAG" \
+            PKGS_PREFIX="$PUBLISH_NAMESPACE" \
+            TARGET_ARGS="--tag=${P2P_SYSEXT_IMAGE} --load"
+
+      - name: save-sysext-image
+        run: |
+          docker save "$P2P_SYSEXT_IMAGE" | zstd -T0 -3 > /tmp/p2p-sysext.tar.zst
+
+      - name: upload-sysext-image
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysext-image
+          path: /tmp/p2p-sysext.tar.zst
+          retention-days: 1
+          compression-level: 0
+
+  # ── Phase 4: Push sysext to registry ────────────────────────────────
+  push-sysext:
+    needs: [build-sysext]
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - name: login-to-ghcr
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download-build-refs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-refs
+
+      - name: load-build-refs
+        run: |
+          cat build-refs.env >> "$GITHUB_ENV"
+
+      - name: download-sysext-image
+        uses: actions/download-artifact@v4
+        with:
+          name: sysext-image
+          path: /tmp/
+
+      - name: load-and-push-sysext
+        run: |
+          zstd -d -c /tmp/p2p-sysext.tar.zst | docker load
+          docker push "$P2P_SYSEXT_IMAGE"
+
+  # ── Phase 5: Build final installer (needs published digests) ────────
+  build-installer:
+    needs: [push-base, push-sysext]
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    steps:
+      - name: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: fetch-full-history
+        run: |
+          git fetch --prune --tags --unshallow || git fetch --prune --tags
+
+      - name: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: install-python-dependencies
+        run: |
+          python3 -m pip install --user PyYAML
+
+      - name: set-up-docker-buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
+
+      - name: login-to-ghcr
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download-build-refs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-refs
+
+      - name: load-build-refs
+        run: |
+          cat build-refs.env >> "$GITHUB_ENV"
+
+      - name: resolve-published-digests
+        run: |
+          image_digest() {
+            local ref="$1"
+            local digest
+            digest="$(docker buildx imagetools inspect "$ref" | sed -n 's/^Digest:[[:space:]]*//p' | head -n1)"
+            test -n "$digest"
+            printf '%s' "$digest"
+          }
+
+          KERNEL_DIGEST="$(image_digest "$KERNEL_IMAGE")"
+          INSTALLER_BASE_DIGEST="$(image_digest "$INSTALLER_BASE_IMAGE")"
+          P2P_PKG_DIGEST="$(image_digest "$P2P_PKG_IMAGE")"
+          P2P_SYSEXT_DIGEST="$(image_digest "$P2P_SYSEXT_IMAGE")"
+          TOOLKIT_SYSEXT_DIGEST="$(image_digest "$TOOLKIT_SYSEXT_IMAGE")"
+
+          {
+            echo "KERNEL_DIGEST=$KERNEL_DIGEST"
+            echo "INSTALLER_BASE_DIGEST=$INSTALLER_BASE_DIGEST"
+            echo "P2P_PKG_DIGEST=$P2P_PKG_DIGEST"
+            echo "P2P_SYSEXT_DIGEST=$P2P_SYSEXT_DIGEST"
+            echo "TOOLKIT_SYSEXT_DIGEST=$TOOLKIT_SYSEXT_DIGEST"
+            echo "CUSTOM_SYSEXT_IMAGE=${P2P_SYSEXT_IMAGE}@${P2P_SYSEXT_DIGEST}"
+            echo "CUSTOM_TOOLKIT_IMAGE=${TOOLKIT_SYSEXT_IMAGE}@${TOOLKIT_SYSEXT_DIGEST}"
+          } >> "$GITHUB_ENV"
+
+      - name: build-final-installer
+        run: |
+          CUSTOM_SYSEXT_IMAGE="$CUSTOM_SYSEXT_IMAGE" \
+          CUSTOM_TOOLKIT_IMAGE="$CUSTOM_TOOLKIT_IMAGE" \
+          BASE_INSTALLER_IMAGE="$INSTALLER_BASE_IMAGE" \
+          INSTALLER_IMAGE_REPO="$INSTALLER_IMAGE_REPO" \
+          INSTALLER_IMAGE_TAG="$RELEASE_TAG" \
+          INSTALLER_SOURCE_LABEL="https://github.com/${{ github.repository }}" \
+          EXTRA_SYSTEM_EXTENSION_IMAGES="$EXTRA_SYSTEM_EXTENSION_IMAGES" \
+          PUSH_INSTALLER=false \
+          bash hack/p2p/build-installer.sh "$MATRIX_PATH"
+
+      - name: export-digest-refs
+        run: |
+          {
+            echo "KERNEL_DIGEST=${KERNEL_DIGEST}"
+            echo "INSTALLER_BASE_DIGEST=${INSTALLER_BASE_DIGEST}"
+            echo "P2P_PKG_DIGEST=${P2P_PKG_DIGEST}"
+            echo "P2P_SYSEXT_DIGEST=${P2P_SYSEXT_DIGEST}"
+            echo "TOOLKIT_SYSEXT_DIGEST=${TOOLKIT_SYSEXT_DIGEST}"
+            echo "CUSTOM_SYSEXT_IMAGE=${CUSTOM_SYSEXT_IMAGE}"
+            echo "CUSTOM_TOOLKIT_IMAGE=${CUSTOM_TOOLKIT_IMAGE}"
+          } > /tmp/digest-refs.env
+
+      - name: save-installer-image
+        run: |
+          docker save "$INSTALLER_IMAGE" | zstd -T0 -3 > /tmp/installer.tar.zst
+
+      - name: upload-digest-refs
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-refs
+          path: /tmp/digest-refs.env
+          retention-days: 1
+
+      - name: upload-installer-image
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-image
+          path: /tmp/installer.tar.zst
+          retention-days: 1
+          compression-level: 0
+
+  # ── Phase 6: Push final installer ───────────────────────────────────
+  push-installer:
+    needs: [build-installer]
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - name: login-to-ghcr
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download-build-refs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-refs
+
+      - name: load-build-refs
+        run: |
+          cat build-refs.env >> "$GITHUB_ENV"
+
+      - name: download-installer-image
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-image
+          path: /tmp/
+
+      - name: load-and-push-installer
+        run: |
+          zstd -d -c /tmp/installer.tar.zst | docker load
+          docker push "$INSTALLER_IMAGE"
+
+  # ── Phase 7: Verify and publish summary ─────────────────────────────
+  verify:
+    needs: [push-installer]
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    steps:
+      - name: setup-python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: set-up-docker-buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
+
+      - name: login-to-ghcr
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download-build-refs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-refs
+
+      - name: load-build-refs
+        run: |
+          cat build-refs.env >> "$GITHUB_ENV"
+
+      - name: download-digest-refs
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-refs
+
+      - name: load-digest-refs
+        run: |
+          cat digest-refs.env >> "$GITHUB_ENV"
+
+      - name: resolve-final-installer-digest
+        run: |
+          INSTALLER_DIGEST="$(docker buildx imagetools inspect "$INSTALLER_IMAGE" | sed -n 's/^Digest:[[:space:]]*//p' | head -n1)"
+          test -n "$INSTALLER_DIGEST"
+          echo "INSTALLER_DIGEST=$INSTALLER_DIGEST" >> "$GITHUB_ENV"
+
+      - name: verify-final-installer
+        run: |
+          installer_digest_ref="${INSTALLER_IMAGE}@${INSTALLER_DIGEST}"
+          installer_pull_ref="${INSTALLER_IMAGE_REPO}"
+
+          printf 'pulling installer image by digest %s\n' "$installer_digest_ref"
+          docker pull "${installer_pull_ref}@${INSTALLER_DIGEST}" >/dev/null
+
+          container_id="$(docker create "$installer_digest_ref")"
+          verify_dir="$(mktemp -d)"
+
+          docker cp "$container_id:/usr/install/${ARCH}/vmlinuz.efi" "$verify_dir/vmlinuz.efi"
+          docker rm "$container_id" >/dev/null
+
+          chmod 644 "$verify_dir/vmlinuz.efi"
+          objcopy --dump-section .initrd="$verify_dir/initrd.bin" "$verify_dir/vmlinuz.efi"
+
+          extension_names="$(python3 - "$verify_dir/initrd.bin" <<'PY'
+          import lzma
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          initrd_path = Path(sys.argv[1])
+          data = initrd_path.read_bytes()
+
+          if data.startswith(b"\x28\xb5\x2f\xfd"):
+              raw = subprocess.run(
+                  ["zstd", "-q", "-d", "-c", str(initrd_path)],
+                  check=True,
+                  stdout=subprocess.PIPE,
+              ).stdout
+          elif data.startswith(b"\xfd7zXZ\x00"):
+              raw = lzma.decompress(data)
+          else:
+              raw = data
+
+          text = raw.decode("utf-8", errors="ignore")
+          pattern = re.compile(
+              r"name: (nvidia-modules-p2p-production|nvidia-container-toolkit-production|nvidia-open-gpu-kernel-modules-production)"
+          )
+
+          for match in pattern.finditer(text):
+              print(match.group(0))
+          PY
+          )"
+
+          printf '%s\n' "$extension_names" | grep -qF "name: nvidia-modules-p2p-production" \
+            || { echo "error: custom P2P NVIDIA sysext is missing from the installer initrd" >&2; exit 1; }
+          printf '%s\n' "$extension_names" | grep -qF "name: nvidia-container-toolkit-production" \
+            || { echo "error: NVIDIA userspace toolkit sysext is missing from the installer initrd" >&2; exit 1; }
+
+          if printf '%s\n' "$extension_names" | grep -qF "name: nvidia-open-gpu-kernel-modules-production"; then
+            echo "error: official nvidia-open-gpu-kernel-modules-production was included alongside the custom P2P sysext" >&2
+            exit 1
+          fi
+
+          printf 'verified installer image: %s\n' "$installer_digest_ref"
+          printf 'verified included extensions:\n%s\n' "$extension_names"
+          printf 'verified excluded extension: nvidia-open-gpu-kernel-modules-production\n'
+
+          rm -rf "$verify_dir"
+
+      - name: publish-summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Published P2P artifacts
+
+          - kernel image: `${KERNEL_IMAGE}@${KERNEL_DIGEST}`
+          - installer-base image: `${INSTALLER_BASE_IMAGE}@${INSTALLER_BASE_DIGEST}`
+          - nvidia-modules-p2p-production-pkg: `${P2P_PKG_IMAGE}@${P2P_PKG_DIGEST}`
+          - nvidia-modules-p2p-production: `${P2P_SYSEXT_IMAGE}@${P2P_SYSEXT_DIGEST}`
+          - nvidia-container-toolkit-production: `${TOOLKIT_SYSEXT_IMAGE}@${TOOLKIT_SYSEXT_DIGEST}`
+          - final installer image: `${INSTALLER_IMAGE}@${INSTALLER_DIGEST}`
+
+          Build tag: `${BUILD_TAG}`
+          Publish tag: `${RELEASE_TAG}`
+          Extra official extensions: `${EXTRA_SYSTEM_EXTENSION_IMAGES}`
+          EOF

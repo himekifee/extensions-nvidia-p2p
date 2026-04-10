@@ -3,6 +3,14 @@
 format: v1alpha2
 
 vars:
+  TOOLS_REV: v1.13.0-beta.0-1-g136f1de
+  LLVM_IMAGE: ghcr.io/siderolabs/llvm
+  kspp_ref: e354f6ab5279f9cfa8bfdd7e13e454ccf69209f9
+  kspp_sha256: 640b25473f86557d082f680b0f57653a69f4146e97825673bf582f9a4c8b7739
+  kspp_sha512: 82dae1debbe94a3f82766a8cdbfe59ff8698d433175803458499b76c50b47b89e9280b677a9f16b2a44711badd6f4001aba951a41722a74dd51c03a18b8b9219
+  linux_version: 6.18.19
+  linux_sha256: eaaf78271cd07c68ad9c4c9a70c72718b33abbd716239d82bac96b1751eb090c
+  linux_sha512: accccbbdaaf31ae817401e8db2037db5bb8d20a9c15147ade7b0150b45ec99c21d3bb07ed433d572985b2b7c5d22dfd3830c57cc3e02812ca5ec0b26e1f9cb31
   CONTAINERD_VERSION: v2.2.2 # update this when updating PKGS_VERSION in Makefile
   LINUX_FIRMWARE_VERSION: "20260309" # update this when updating PKGS_VERSION in Makefile
   DRBD_DRIVER_VERSION: 9.3.1 # update this when updating PKGS_VERSION in Makefile

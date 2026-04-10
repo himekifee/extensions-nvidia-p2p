@@ -1,0 +1,134 @@
+name: nvidia-modules-p2p-production-pkg
+variant: scratch
+shell: /bin/bash
+dependencies:
+  - stage: base
+  - stage: kernel-build
+  - image: "{{ .LLVM_IMAGE }}:{{ .TOOLS_REV }}"
+steps:
+  - sources:
+    # {{ if eq .ARCH "aarch64" }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+      - url: https://developer.download.nvidia.com/compute/nvidia-driver/redist/nvidia_driver/linux-sbsa/nvidia_driver-linux-sbsa-{{ .NVIDIA_DRIVER_PRODUCTION_VERSION }}-archive.tar.xz
+        destination: nvidia.tar.xz
+        sha256: "{{ .NVIDIA_PKGS_PRODUCTION_ARM64_SHA256 }}"
+        sha512: "{{ .NVIDIA_PKGS_PRODUCTION_ARM64_SHA512 }}"
+    # {{ else }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+      - url: https://developer.download.nvidia.com/compute/nvidia-driver/redist/nvidia_driver/linux-x86_64/nvidia_driver-linux-x86_64-{{ .NVIDIA_DRIVER_PRODUCTION_VERSION }}-archive.tar.xz
+        destination: nvidia.tar.xz
+        sha256: "{{ .NVIDIA_PKGS_PRODUCTION_AMD64_SHA256 }}"
+        sha512: "{{ .NVIDIA_PKGS_PRODUCTION_AMD64_SHA512 }}"
+    # {{ end }} This in fact is YAML comment, but Go templating instruction is evaluated by bldr
+      - url: https://github.com/aikitoria/open-gpu-kernel-modules/compare/db0c4e65c8e34c678d745ddb1317f53f90d1072b...2b75b4991f506526ff6dbd179d61e5f8797ebb15.diff
+        destination: p2p.diff
+        sha256: "6d1870050a976aafdfb9d7191e026ccf203aa44bcb0e7addaba1ac11273f78b9"
+        sha512: "6245bf6684671a89dbe63b17359012cb59f2068112c29d7130e8bfa1b87acd6f6844103cc1ae7cb863ea12fad067b5f8cffff639f1cdd583d9b104519c007c88"
+      - url: https://github.com/NVIDIA/gdrcopy/archive/refs/tags/{{ .GDRCOPY_VERSION }}.tar.gz
+        destination: gdrcopy.tar.gz
+        sha256: "{{ .GDRCOPY_SHA256 }}"
+        sha512: "{{ .GDRCOPY_SHA512 }}"
+    env:
+      ARCH: '{{ if eq .ARCH "aarch64"}}arm64{{ else if eq .ARCH "x86_64" }}x86_64{{ else }}unsupported{{ end }}'
+      UPSTREAM_OPEN_MODULE_TAG: '{{ .NVIDIA_DRIVER_PRODUCTION_VERSION }}'
+      P2P_SOURCE_RELEASE: 595.58.03-p2p
+      UPSTREAM_BASE_COMMIT: db0c4e65c8e34c678d745ddb1317f53f90d1072b
+      P2P_PATCH_COMMIT: 2b75b4991f506526ff6dbd179d61e5f8797ebb15
+      P2P_COMPARE_DIFF_URL: https://github.com/aikitoria/open-gpu-kernel-modules/compare/db0c4e65c8e34c678d745ddb1317f53f90d1072b...2b75b4991f506526ff6dbd179d61e5f8797ebb15.diff
+    prepare:
+      - |
+        printf 'p2p upstream tag: %s\n' "${UPSTREAM_OPEN_MODULE_TAG}"
+        printf 'p2p donor release: %s\n' "${P2P_SOURCE_RELEASE}"
+        printf 'p2p donor base: %s\n' "${UPSTREAM_BASE_COMMIT}"
+        printf 'p2p donor patch: %s\n' "${P2P_PATCH_COMMIT}"
+        printf 'p2p compare diff: %s\n' "${P2P_COMPARE_DIFF_URL}"
+        mkdir -p /nvidia-driver
+        tar xf nvidia.tar.xz -C /nvidia-driver --strip-components=1
+        python3 - <<'PY'
+        import re
+        from pathlib import Path
+        src = Path('p2p.diff')
+        dst = Path('p2p-redist.diff')
+        text = src.read_text()
+        text = re.sub(r'^(diff --git a/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        text = re.sub(r'^(diff --git a/[^ ]+ b/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        text = re.sub(r'^(--- a/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        text = re.sub(r'^(\+\+\+ b/)src/', r'\1src/kernel-module-source/src/', text, flags=re.MULTILINE)
+        dst.write_text(text)
+        PY
+        git -C /nvidia-driver init
+        git -C /nvidia-driver apply --check "$(pwd)/p2p-redist.diff"
+        git -C /nvidia-driver apply "$(pwd)/p2p-redist.diff"
+      - |
+        mkdir -p /gdrcopy
+        tar xf gdrcopy.tar.gz -C /gdrcopy --strip-components=1
+    build:
+      - |
+        export CC=clang
+        export HOSTCC=clang
+        export HOSTCXX=clang++
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export STRIP=llvm-strip
+
+        cd /nvidia-driver/kernel-open
+
+        make -j $(nproc) LLVM=1 SYSSRC=/src
+      - |
+        export CC=clang
+        export HOSTCC=clang
+        export HOSTCXX=clang++
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export STRIP=llvm-strip
+
+        cd /gdrcopy/src/gdrdrv
+
+        make -C /src LLVM=1 M=/gdrcopy/src/gdrdrv modules \
+          NVIDIA_SRC_DIR=/nvidia-driver/kernel-open/nvidia \
+          NVIDIA_IS_OPENSOURCE=y \
+          HAVE_VM_FLAGS_SET=y \
+          HAVE_PROC_OPS=y \
+          KDIR=/src
+    install:
+      - |
+        export CC=clang
+        export HOSTCC=clang
+        export HOSTCXX=clang++
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export STRIP=llvm-strip
+
+        cd /nvidia-driver/kernel-open
+
+        mkdir -p /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+        cp /src/modules.order /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+        cp /src/modules.builtin /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+        cp /src/modules.builtin.modinfo /rootfs/usr/lib/modules/$(cat /src/include/config/kernel.release)/
+
+        make -j $(nproc) LLVM=1 modules_install SYSSRC=/src INSTALL_MOD_PATH=/rootfs/usr INSTALL_MOD_STRIP=1
+      - |
+        export CC=clang
+        export HOSTCC=clang
+        export HOSTCXX=clang++
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export OBJCOPY=llvm-objcopy
+        export STRIP=llvm-strip
+
+        cd /gdrcopy
+
+        make -C /src LLVM=1 M=/gdrcopy/src/gdrdrv modules_install INSTALL_MOD_PATH=/rootfs/usr INSTALL_MOD_DIR=extras INSTALL_MOD_STRIP=1
+    test:
+      - |
+        find /rootfs/usr/lib/modules -name '*.ko' -exec grep -FL '~Module signature appended~' {} \+
+      - |
+        fhs-validator /rootfs
+finalize:
+  - from: /rootfs
+    to: /

@@ -48,7 +48,7 @@ Intel ucode: 20260227
 ZFS: 2.4.1
 lldpd: 1.0.21
 px-fuse: 4b7ade7d7a4afe10b87ff7a16a59e9d1e3fae68f
-gdrcopy: v2.5.2
+gdrcopy: v2.5.1
 """
 
 [make_deps]

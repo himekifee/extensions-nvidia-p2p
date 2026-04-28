@@ -3,7 +3,7 @@ variant: scratch
 shell: /bin/bash
 dependencies:
  - stage: base
- - image: "{{ .BUILD_ARG_PKGS_PREFIX }}/nvidia-modules-p2p-production-pkg:{{ .BUILD_ARG_PKGS }}"
+ - image: '{{ if .BUILD_ARG_P2P_PKG_IMAGE_REF }}{{ .BUILD_ARG_P2P_PKG_IMAGE_REF }}{{ else }}{{ .BUILD_ARG_PKGS_PREFIX }}/nvidia-modules-p2p-production-pkg:{{ .BUILD_ARG_PKGS }}{{ end }}'
 steps:
   - install:
       - |

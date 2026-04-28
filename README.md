@@ -1,26 +1,30 @@
 # Talos NVIDIA P2P System Extensions
 
-Fork of [`siderolabs/extensions`](https://github.com/siderolabs/extensions) that adds working NVIDIA peer-to-peer (P2P) GPU memory support to Talos Linux.
+Fork of [`siderolabs/extensions`](https://github.com/siderolabs/extensions) used to build and test NVIDIA peer-to-peer (P2P) GPU memory support on Talos Linux.
 
-The stock Talos NVIDIA open-source driver modules ship without working PCIe P2P/GPUDirect support on Talos Linux. This fork patches the open GPU kernel modules with the [aikitoria P2P donor patch](https://github.com/aikitoria/open-gpu-kernel-modules/tree/595.58.03-p2p) on top of its native NVIDIA 595.58.03 production base, keeps the same-key kernel/module build plumbing required for Talos `v1.13.0-beta.1` / kernel `6.18.19-talos`, and applies the donor-equivalent RM P2P overrides through `NVreg_RegistryDwords` in `nvidia-gpu/nvidia-modules-p2p/pkg/production/files/nvidia.conf`. Everything else (userspace toolkit, container runtime, glibc, etc.) stays on stock official Talos production artifacts for the 595 family.
+The stock Talos NVIDIA open-source driver modules ship without PCIe P2P exposed for this RTX 5090 test topology. This fork patches the open GPU kernel modules with the [aikitoria P2P donor patch](https://github.com/aikitoria/open-gpu-kernel-modules/tree/595.58.03-p2p) on top of its native NVIDIA 595.58.03 production base, keeps the same-key kernel/module build plumbing required for Talos `v1.13.0` / kernel `6.18.24-talos`, and can force NVIDIA RM P2P exposure through `NVreg_RegistryDwords` in `nvidia-gpu/nvidia-modules-p2p/pkg/production/files/nvidia.conf`. Everything else (userspace toolkit, container runtime, glibc, etc.) stays on stock official Talos production artifacts for the 595 family.
 
-Successful beta1/595 deployments should show:
+Current v1.13/595 status: capability exposure is not sufficient evidence of correctness. A deployment may show:
 
 - `nvidia-smi topo -p2p r` = `OK`
 - `cuDeviceCanAccessPeer` = `1` in both directions
 - `cuCtxEnablePeerAccess` = `CUDA_SUCCESS` in both directions
-- `p2pBandwidthLatencyTest` = working peer connectivity
+- `p2pBandwidthLatencyTest` = high peer bandwidth
+
+and still corrupt peer data on Talos. Always validate with the custom integrity probe in `p2p/`; bandwidth-only samples are not correctness tests.
+
+Latest isolation result: Arch Linux 6.19.11 with NVIDIA 595.58.03 passes the integrity probe on the same Proxmox host and also when its disk is booted on the Talos VM's Gigabyte RTX 5090 passthrough path. VM199 also passes with both Proxmox `viommu=intel` and guest `intel_iommu=on iommu=pt` removed. The remaining failure is therefore not explained by vIOMMU, guest IOMMU flags/groups, ACS, BAR1 size alone, the Gigabyte cards, or the physical host PCIe path by themselves.
 
 ## Current Target Versions
 
 | Component | Version / Pin |
 |---|---|
-| Talos Linux | v1.13.0-beta.1 |
-| Kubernetes | v1.36.0-beta.0 |
+| Talos Linux | v1.13.0 |
+| Kubernetes | v1.36.0 |
 | NVIDIA open driver (production) | 595.58.03 |
 | NVIDIA container toolkit (production) | 595.58.03-v1.19.0 |
 | P2P donor patch base | aikitoria 595.58.03-p2p, kept on the donor-native 595.58.03 base |
-| Custom artifact publish state | Pending branch publish for `v1.13.0-beta.1` |
+| Custom artifact publish state | Pending branch publish for `v1.13.0` |
 
 Full version matrix with digests, abort conditions, and verification commands: [`docs/release-matrix.yaml`](docs/release-matrix.yaml).
 
@@ -39,19 +43,21 @@ Full version matrix with digests, abort conditions, and verification commands: [
 **Untouched upstream**:
 Everything else. The full upstream `siderolabs/extensions` tree is preserved: `container-runtime/`, `drivers/`, `drm/`, `dvb/`, `firmware/`, `guest-agents/`, `misc/`, `network/`, `nvidia-gpu/nvidia-modules/`, `nvidia-gpu/nonfree/`, `nvidia-gpu/nvidia-container-toolkit/`, `power/`, `storage/`, `tools/`, `examples/`, `reproducibility/`, and `internal/`.
 
-## Required Runtime Fix
+## Runtime P2P Forcing / Diagnostic Setting
 
-The critical runtime change that enables PCIe P2P on Talos is applying the donor-equivalent RM overrides at module load time:
+The current production P2P extension forces NVIDIA RM to expose PCIe P2P at module load time:
 
 ```conf
-options nvidia NVreg_RegistryDwords="ForceP2P=17;RMForceP2PType=1;RMPcieP2PType=1;PeerMappingOverride=1;RMForceStaticBar1=1"
+options nvidia NVreg_RegistryDwords="ForceP2P=17"
 ```
 
 That setting lives in:
 
 - `nvidia-gpu/nvidia-modules-p2p/pkg/production/files/nvidia.conf`
 
-The build also keeps one additional code fix that is still required:
+Important: this is a diagnostic/enablement setting, not a validated correctness fix on Talos. With `ForceP2P=17`, Talos can report peer access as available while `simpleP2P` and `p2p_integrity_probe` still fail integrity. The same Arch/NVIDIA stack passes with peer access enabled, so `ForceP2P=17` is not inherently sufficient to explain the corruption.
+
+The build also keeps one additional code path from the donor patch series:
 
 - static BAR1 forced on in the packaged NVIDIA source tree
 
@@ -155,10 +161,14 @@ kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'
 talosctl read /proc/version --nodes <node-ip>
 talosctl read /proc/driver/nvidia/params --nodes <node-ip>
 
-# Validate runtime P2P outcome from a GPU pod
+# Check runtime P2P capability exposure from a GPU pod
 nvidia-smi topo -p2p r
 nvidia-smi topo -p2p a
 p2pBandwidthLatencyTest
+
+# Validate runtime P2P correctness; bandwidth-only samples are not enough
+simpleP2P
+p2p/p2p_integrity_probe
 ```
 
 ## Contributor Notes

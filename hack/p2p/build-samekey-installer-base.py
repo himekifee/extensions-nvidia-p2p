@@ -192,6 +192,27 @@ def extract_single_layer_image(image_tar_path: Path, output_dir: Path) -> None:
             layer_tar.extractall(output_dir)
 
 
+def make_tree_readable_for_repack(root_dir: Path) -> None:
+    for current_dir, dir_names, file_names in os.walk(root_dir):
+        current_path = Path(current_dir)
+        current_mode = stat.S_IMODE(current_path.lstat().st_mode)
+        current_path.chmod(current_mode | stat.S_IRUSR | stat.S_IXUSR)
+
+        for dir_name in dir_names:
+            dir_path = current_path / dir_name
+            if dir_path.is_symlink():
+                continue
+            mode = stat.S_IMODE(dir_path.lstat().st_mode)
+            dir_path.chmod(mode | stat.S_IRUSR | stat.S_IXUSR)
+
+        for file_name in file_names:
+            file_path = current_path / file_name
+            mode = file_path.lstat().st_mode
+            if stat.S_ISREG(mode):
+                permissions = stat.S_IMODE(mode)
+                file_path.chmod(permissions | stat.S_IRUSR)
+
+
 def parse_newc_archive(archive_path: Path) -> tuple[list[CpioEntry], bytes]:
     entries: list[CpioEntry] = []
 
@@ -433,23 +454,23 @@ def managed_work_dir() -> Iterator[Path]:
 
 def main() -> None:
     stock_installer_image = os.environ.get(
-        "STOCK_INSTALLER_BASE_IMAGE", "ghcr.io/siderolabs/installer-base:v1.13.0-beta.1"
+        "STOCK_INSTALLER_BASE_IMAGE", "ghcr.io/siderolabs/installer-base:v1.13.0"
     )
     source_installer_image = os.environ.get("SOURCE_INSTALLER_IMAGE", "").strip()
-    imager_image = os.environ.get("IMAGER_IMAGE", "ghcr.io/siderolabs/imager:v1.13.0-beta.1")
+    imager_image = os.environ.get("IMAGER_IMAGE", "ghcr.io/siderolabs/imager:v1.13.0")
     samekey_kernel_image = os.environ.get(
         "SAMEKEY_KERNEL_IMAGE",
-        "ghcr.io/<your-org>/extensions-nvidia-p2p/kernel:v1.13.0-beta.1-samekey",
+        "ghcr.io/<your-org>/extensions-nvidia-p2p/kernel:v1.13.0-samekey",
     )
     squashfs_tools_image = os.environ.get(
-        "SQUASHFS_TOOLS_IMAGE", "ghcr.io/siderolabs/squashfs-tools:v1.12.0"
+        "SQUASHFS_TOOLS_IMAGE", "ghcr.io/siderolabs/squashfs-tools:v1.13.0"
     )
-    xz_image = os.environ.get("XZ_IMAGE", "ghcr.io/siderolabs/xz:v1.12.0")
-    zlib_image = os.environ.get("ZLIB_IMAGE", "ghcr.io/siderolabs/zlib:v1.12.0")
-    zstd_image = os.environ.get("ZSTD_IMAGE", "ghcr.io/siderolabs/zstd:v1.12.0")
+    xz_image = os.environ.get("XZ_IMAGE", "ghcr.io/siderolabs/xz:v1.13.0")
+    zlib_image = os.environ.get("ZLIB_IMAGE", "ghcr.io/siderolabs/zlib:v1.13.0")
+    zstd_image = os.environ.get("ZSTD_IMAGE", "ghcr.io/siderolabs/zstd:v1.13.0")
     output_image = os.environ.get(
         "OUTPUT_IMAGE",
-        "ghcr.io/<your-org>/extensions-nvidia-p2p/installer-base:v1.13.0-beta.1-samekey",
+        "ghcr.io/<your-org>/extensions-nvidia-p2p/installer-base:v1.13.0-samekey",
     )
     push_output = os.environ.get("PUSH_OUTPUT", "true").lower() not in {
         "0",
@@ -601,6 +622,7 @@ def main() -> None:
             "unsquashfs",
             ["-no-xattrs", "-d", str(rootfs_dir), str(stock_rootfs_sqsh)],
         )
+        make_tree_readable_for_repack(rootfs_dir)
 
         target_modules_root = rootfs_dir / f"usr/lib/modules/{kernel_release}"
         if target_modules_root.exists():
@@ -621,6 +643,7 @@ def main() -> None:
             [
                 str(rootfs_dir),
                 str(rebuilt_rootfs_sqsh),
+                "-all-root",
                 "-comp",
                 "zstd",
                 "-Xcompression-level",

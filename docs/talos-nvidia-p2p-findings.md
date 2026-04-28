@@ -1,11 +1,11 @@
 # Talos NVIDIA P2P: Engineering Findings
 
-Reference document for contributors working on custom NVIDIA kernel module extensions for Talos Linux. These findings come from building, debugging, and deploying a P2P-patched NVIDIA open GPU kernel module as a Talos system extension against Talos v1.13.0-beta.1 with the NVIDIA 595.58.03 production driver track.
+Reference document for contributors working on custom NVIDIA kernel module extensions for Talos Linux. These findings come from building, debugging, and deploying a P2P-patched NVIDIA open GPU kernel module as a Talos system extension against Talos v1.13.0 with the NVIDIA 595.58.03 production driver track.
 
 ## Table of Contents
 
 - [The Three-Repo Architecture](#the-three-repo-architecture)
-- [Validated Runtime Fix](#validated-runtime-fix)
+- [Current P2P Status and Isolation Results](#current-p2p-status-and-isolation-results)
 - [Kernel Module Signing Lineage](#kernel-module-signing-lineage)
 - [Extension Composition and Overlay Order](#extension-composition-and-overlay-order)
 - [ld.so.cache and Library Discovery](#ldsocache-and-library-discovery)
@@ -40,12 +40,12 @@ Kernel module compilation is a *pkgs* concern. Extensions just wrap pre-built im
 
 The P2P extension breaks this separation by necessity: it needs to *patch* the source before compiling. So the local repo imports minimal kernel build stages from `siderolabs/pkgs` to get a working kernel build tree (`/src`).
 
-## Validated Runtime Fix
+## Current P2P Status and Isolation Results
 
-The critical Talos-specific fix is forcing donor-equivalent RM registry overrides at module load time through `nvidia.conf`:
+The current Talos P2P extension can force NVIDIA RM to expose PCIe peer access at module load time through `nvidia.conf`:
 
 ```conf
-options nvidia NVreg_RegistryDwords="ForceP2P=17;RMForceP2PType=1;RMPcieP2PType=1;PeerMappingOverride=1;RMForceStaticBar1=1"
+options nvidia NVreg_RegistryDwords="ForceP2P=17"
 ```
 
 That configuration ships from:
@@ -59,21 +59,49 @@ and is installed into the sysext rootfs at:
 Why this matters:
 
 - The donor patch must still be compiled into the kernel modules.
-- On Talos, that patch alone was not sufficient to make runtime P2P capability checks succeed.
-- The working build requires the RM registry overrides to be present at module load time so the driver exposes the expected P2P behavior.
+- On Talos, the patch alone was not sufficient to make runtime P2P capability checks succeed.
+- `ForceP2P=17` can make the driver expose peer access for diagnostics.
+- Exposed peer access is **not** proof of data correctness.
 
-### Validated runtime outcome
+### Current runtime outcome on Talos
 
-With the patched modules and the registry overrides live:
+With the patched modules and `ForceP2P=17` live on `asmrone-datasets-0` / VM117:
 
 - `nvidia-smi topo -p2p r` reports `OK`
 - `cuDeviceCanAccessPeer` reports `1` in both directions
 - `cuCtxEnablePeerAccess` returns `CUDA_SUCCESS` in both directions
-- `p2pBandwidthLatencyTest` succeeds with working peer connectivity
+- bandwidth-only samples print very high P2P numbers
+- `simpleP2P` fails data verification
+- `p2p_integrity_probe` fails peer-enabled `cudaMemcpyDefault`, `cudaMemcpyPeer`, SM remote-store, and SM remote-load
+- peer-disabled `cudaMemcpyDefault` and manual host-staged copies pass
+
+Treat `ForceP2P=17` as a way to expose the peer path for testing, not as a validated Talos correctness fix.
+
+### A/B tests that changed the conclusion
+
+The following tests were run after the initial Talos corruption report:
+
+1. **Arch VM199 without guest IOMMU flags**
+   - Removed `intel_iommu=on iommu=pt` from the Arch guest cmdline.
+   - Result: `p2p_integrity_probe 8 1` and `p2p_integrity_probe 268435456 4` still passed.
+
+2. **Arch VM199 without Proxmox vIOMMU**
+   - Changed VM199 from `machine: q35,viommu=intel` to `machine: q35`.
+   - Rebooted with no guest `intel_iommu=on iommu=pt`.
+   - Guest state: no DMAR ACPI table, empty `/sys/class/iommu`, zero IOMMU groups.
+   - Result: all integrity-probe peer paths still passed at roughly 19.8 GiB/s CE/SM peer bandwidth.
+
+3. **Arch disk booted on VM117's Talos/Gigabyte GPU passthrough path**
+   - Cloned VM199's Arch disk to `gpu_nvme_pool/vmstorage/vm-117-disk-3`.
+   - Temporarily booted VM117 from that disk on the VM117 passthrough GPUs (`0000:17:00.0` and `0000:31:00.0`, Gigabyte RTX 5090 VBIOS `98.02.2E.80.39`).
+   - Result: `p2p_integrity_probe 8 1` and `p2p_integrity_probe 268435456 4` passed in all peer paths.
+   - Original VM117 and VM199 configs were restored after the test; the clone remains for repeatability unless explicitly removed.
+
+These tests rule out Proxmox vIOMMU, guest `intel_iommu=on iommu=pt`, guest IOMMU groups, ACS programming, the Gigabyte cards, and the physical host PCIe path as sufficient explanations by themselves. The remaining root cause is in the Talos kernel/module/runtime environment or its interaction with NVIDIA RM, not in generic hardware capability reporting.
 
 ### `nvidia-smi topo -p2p a` nuance
 
-`nvidia-smi topo -p2p a` is not a reliable pass/fail signal for this setup. A working deployment can still report `NS` for atomics while read capability, CUDA peer access, and the runtime bandwidth/latency test all succeed. Treat `topo -p2p r`, CUDA peer-access APIs, and `p2pBandwidthLatencyTest` as the real verification signals.
+`nvidia-smi topo -p2p a` is not a reliable pass/fail signal for this setup. A working deployment can still report `NS` for atomics. More importantly, `topo -p2p r/w`, CUDA peer-access APIs, and `p2pBandwidthLatencyTest` are also not sufficient correctness signals. Treat `p2p_integrity_probe` and `simpleP2P` verification as the real pass/fail checks.
 
 ## Kernel Module Signing Lineage
 
@@ -174,7 +202,7 @@ The toolkit extension solves this by running `ldconfig -r /rootfs` at build time
 
 ### CDI generation service config
 
-On Talos v1.13.0-beta.1, the CDI spec generation runs as a Talos service:
+On Talos v1.13.0, the CDI spec generation runs as a Talos service:
 ```
 nvidia-ctk cdi generate \
   --library-search-path /usr/local/glibc/usr/lib \
@@ -244,29 +272,36 @@ After deploying a new installer to a node, verify in this order:
 8. **CDI spec:** `talosctl read /run/cdi/nvidia.yaml --nodes <ip>` ... confirms CDI generation succeeded
 9. **GPU operator:** `kubectl get pods -n gpu-operator` ... all pods should be Running/Completed
 10. **Allocatable GPUs:** `kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'` ... should show the expected GPU count
-11. **Runtime P2P check:** run `nvidia-smi topo -p2p r`, confirm CUDA peer access works, and verify `p2pBandwidthLatencyTest` succeeds
+11. **Runtime P2P capability check:** run `nvidia-smi topo -p2p r/w` and confirm CUDA peer access reports as available when intentionally forced
+12. **Runtime P2P correctness check:** run `simpleP2P` and `p2p/p2p_integrity_probe`; peer-enabled copies and SM remote load/store must verify correct data
 
-If step 3 fails (modules present on disk but not loaded), suspect a signing-key mismatch. If step 4 fails, suspect missing runtime registry overrides. If step 5 fails, suspect a signing or kernel-payload issue. If step 8 fails, suspect an `ld.so.cache` overlay-ordering problem.
+If step 3 fails (modules present on disk but not loaded), suspect a signing-key mismatch. If step 4 fails, suspect missing runtime registry overrides. If step 5 fails, suspect a signing or kernel-payload issue. If step 8 fails, suspect an `ld.so.cache` overlay-ordering problem. If step 11 succeeds but step 12 fails, the peer path is exposed but not correct; do not treat bandwidth-only samples as passing validation.
 
 ## Ruled-Out Hypotheses
 
-These explanations were investigated and are not the root cause of the current Talos P2P issue:
+These explanations were investigated and are not sufficient root causes of the current Talos P2P issue:
 
 - the donor P2P patch being inherently broken on this GPU generation
+- Proxmox `viommu=intel` by itself
+- guest `intel_iommu=on iommu=pt` by itself
+- missing guest IOMMU groups/DMAR by itself
+- ACS control state by itself
 - the VM machine type, OVMF, or guest IOMMU flags by themselves
+- the Gigabyte RTX 5090 cards / VBIOS `98.02.2E.80.39` by themselves
+- the physical host PCIe path used by VM117 by itself
 - GPU operator bring-up alone
 - allocatable GPU reporting alone
 - BAR1 sizing alone
 
-The durable conclusion is that the Talos-specific failure mode lived in the runtime bring-up path: signing lineage, installer/kernel consistency, extension overlay ordering, and the RM registry overrides all had to be correct at the same time.
+The durable conclusion is narrower now: Talos can expose a peer path that corrupts data, while the same Arch/NVIDIA userspace and driver family can pass on the same Proxmox host and even on VM117's GPU passthrough path. Continue investigating Talos kernel/module/runtime behavior rather than generic PCIe capability exposure.
 
 ## Known Gotchas
 
-- **`PKGS` version format.** The Makefile's `PKGS` variable uses `git describe` format from the pkgs repo (e.g., `v1.13.0-beta.0-5-g142b074`), not the Talos release version. Don't confuse `v1.13.0-beta.1` (Talos) with `v1.13.0-beta.0-5-g142b074` (pkgs).
+- **`PKGS` version format.** The Makefile's `PKGS` variable tracks the pkgs release tag (for this release, `v1.13.0`). During prereleases it may use a `git describe` value from the pkgs repo (for example, `v1.13.0-beta.0-5-g142b074`) rather than the Talos release version.
 
 - **`make target-*` vs `make *`.** The custom P2P pkg doesn't get a top-level make target. Use `make target-nvidia-modules-p2p-production-pkg` (the generic target runner) instead of `make nvidia-modules-p2p-production-pkg` (which doesn't exist).
 
-- **Installer-base requirements.** The stock `ghcr.io/siderolabs/installer-base:v1.13.0-beta.1` may not contain `/usr/install/<arch>/vmlinuz` after `docker load`. The custom `build-samekey-installer-base.py` script produces an installer-base that does.
+- **Installer-base requirements.** The stock `ghcr.io/siderolabs/installer-base:v1.13.0` may not contain `/usr/install/<arch>/vmlinuz` after `docker load`. The custom `build-samekey-installer-base.py` script produces an installer-base that does.
 
 - **BuildKit cache can preserve stale kernel or module outputs.** A superficially successful rebuild can still contain an older `nvidia.ko` or kernel payload if the relevant copy/build layers were reused. Prefer stage-scoped cache busting when validating rebuilt artifacts.
 

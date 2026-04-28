@@ -35,7 +35,7 @@ If `artifacts.customSysextImage` is still null during a branch migration, pass `
 
 Rebuilds the installer-base image with a kernel that shares the same module-signing key lineage as the locally compiled P2P modules.
 
-The stock `ghcr.io/siderolabs/installer-base:v1.13.0-beta.1` won't work because its kernel was compiled with a different signing key than the local kernel build tree. This script produces an installer-base whose embedded kernel trusts the same key that signed the custom `.ko` files.
+The stock `ghcr.io/siderolabs/installer-base:v1.13.0` won't work because its kernel was compiled with a different signing key than the local kernel build tree. This script produces an installer-base whose embedded kernel trusts the same key that signed the custom `.ko` files.
 
 ### `check-matrix.sh`
 

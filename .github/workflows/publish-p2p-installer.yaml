@@ -145,6 +145,9 @@ jobs:
               os.environ.get("INPUT_BUILD_TAG", "")
               or f"{talos_version}-g{short_sha}"
           )
+          artifact_tag = sanitize(
+              f"{release_tag}-run{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
 
           platform_map = {
               "amd64": "linux/amd64",
@@ -169,13 +172,13 @@ jobs:
               "DRIVER_VERSION": driver_version,
               "SOURCE_DATE_EPOCH": source_date_epoch,
               "RELEASE_TAG": release_tag,
+              "ARTIFACT_TAG": artifact_tag,
               "BUILD_TAG": build_tag,
-              "CUSTOM_PKG_TAG": release_tag,
-              "KERNEL_IMAGE": f"{publish_namespace}/kernel:{release_tag}",
-              "INSTALLER_BASE_IMAGE": f"{publish_namespace}/installer-base:{release_tag}",
-              "P2P_PKG_IMAGE": f"{publish_namespace}/nvidia-modules-p2p-production-pkg:{release_tag}",
-              "P2P_SYSEXT_IMAGE": f"{publish_namespace}/nvidia-modules-p2p-production:{release_tag}",
-              "TOOLKIT_SYSEXT_IMAGE": f"{publish_namespace}/nvidia-container-toolkit-production:{release_tag}",
+              "CUSTOM_PKG_TAG": artifact_tag,
+              "KERNEL_IMAGE": f"{publish_namespace}/kernel:{artifact_tag}",
+              "INSTALLER_BASE_IMAGE": f"{publish_namespace}/installer-base:{artifact_tag}",
+              "P2P_PKG_IMAGE": f"{publish_namespace}/nvidia-modules-p2p-production-pkg:{artifact_tag}",
+              "P2P_SYSEXT_IMAGE": f"{publish_namespace}/nvidia-modules-p2p-production:{artifact_tag}",
               "INSTALLER_IMAGE_REPO": f"{publish_namespace}/nvidia-open-gpu-kernel-modules-p2p-installer",
               "INSTALLER_IMAGE": f"{publish_namespace}/nvidia-open-gpu-kernel-modules-p2p-installer:{release_tag}",
               "EXTRA_SYSTEM_EXTENSION_IMAGES": ",".join(extra_extensions),
@@ -254,26 +257,17 @@ jobs:
             echo "DRIVER_VERSION=${DRIVER_VERSION}"
             echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
             echo "RELEASE_TAG=${RELEASE_TAG}"
+            echo "ARTIFACT_TAG=${ARTIFACT_TAG}"
             echo "BUILD_TAG=${BUILD_TAG}"
             echo "CUSTOM_PKG_TAG=${CUSTOM_PKG_TAG}"
             echo "KERNEL_IMAGE=${KERNEL_IMAGE}"
             echo "INSTALLER_BASE_IMAGE=${INSTALLER_BASE_IMAGE}"
             echo "P2P_PKG_IMAGE=${P2P_PKG_IMAGE}"
             echo "P2P_SYSEXT_IMAGE=${P2P_SYSEXT_IMAGE}"
-            echo "TOOLKIT_SYSEXT_IMAGE=${TOOLKIT_SYSEXT_IMAGE}"
             echo "INSTALLER_IMAGE_REPO=${INSTALLER_IMAGE_REPO}"
             echo "INSTALLER_IMAGE=${INSTALLER_IMAGE}"
             echo "EXTRA_SYSTEM_EXTENSION_IMAGES=${EXTRA_SYSTEM_EXTENSION_IMAGES}"
           } > /tmp/build-refs.env
-
-      - name: build-toolkit-sysext
-        run: |
-          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-          make target-nvidia-container-toolkit-production \
-            PLATFORM="$PLATFORM" \
-            PROGRESS=plain \
-            TAG="$BUILD_TAG" \
-            TARGET_ARGS="--tag=${TOOLKIT_SYSEXT_IMAGE} --load"
 
       - name: save-base-images
         run: |
@@ -281,7 +275,6 @@ jobs:
           docker save "$KERNEL_IMAGE" | zstd -T0 -3 > /tmp/images/kernel.tar.zst
           docker save "$INSTALLER_BASE_IMAGE" | zstd -T0 -3 > /tmp/images/installer-base.tar.zst
           docker save "$P2P_PKG_IMAGE" | zstd -T0 -3 > /tmp/images/p2p-pkg.tar.zst
-          docker save "$TOOLKIT_SYSEXT_IMAGE" | zstd -T0 -3 > /tmp/images/toolkit-sysext.tar.zst
 
       - name: upload-build-refs
         uses: actions/upload-artifact@v4
@@ -336,7 +329,6 @@ jobs:
           zstd -d -c /tmp/images/kernel.tar.zst | docker load
           zstd -d -c /tmp/images/installer-base.tar.zst | docker load
           zstd -d -c /tmp/images/p2p-pkg.tar.zst | docker load
-          zstd -d -c /tmp/images/toolkit-sysext.tar.zst | docker load
 
       - name: push-samekey-kernel
         run: |
@@ -350,9 +342,30 @@ jobs:
         run: |
           docker push "$P2P_PKG_IMAGE"
 
-      - name: push-toolkit-sysext
+      - name: resolve-base-digests
         run: |
-          docker push "$TOOLKIT_SYSEXT_IMAGE"
+          image_digest() {
+            local ref="$1"
+            local digest
+            digest="$(docker buildx imagetools inspect "$ref" | sed -n 's/^Digest:[[:space:]]*//p' | head -n1)"
+            test -n "$digest"
+            printf '%s' "$digest"
+          }
+
+          {
+            echo "KERNEL_DIGEST=$(image_digest "$KERNEL_IMAGE")"
+            echo "INSTALLER_BASE_DIGEST=$(image_digest "$INSTALLER_BASE_IMAGE")"
+            echo "P2P_PKG_DIGEST=$(image_digest "$P2P_PKG_IMAGE")"
+          } > /tmp/base-digests.env
+
+          cat /tmp/base-digests.env
+
+      - name: upload-base-digests
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-digests
+          path: /tmp/base-digests.env
+          retention-days: 1
 
   # ── Phase 3: Build sysext (needs p2p-pkg from registry) ────────────
   build-sysext:
@@ -385,9 +398,15 @@ jobs:
         with:
           name: build-refs
 
+      - name: download-base-digests
+        uses: actions/download-artifact@v4
+        with:
+          name: base-digests
+
       - name: load-build-refs
         run: |
           cat build-refs.env >> "$GITHUB_ENV"
+          cat base-digests.env >> "$GITHUB_ENV"
 
       - name: build-p2p-sysext
         run: |
@@ -398,7 +417,8 @@ jobs:
             TAG="$BUILD_TAG" \
             PKGS="$CUSTOM_PKG_TAG" \
             PKGS_PREFIX="$PUBLISH_NAMESPACE" \
-            TARGET_ARGS="--tag=${P2P_SYSEXT_IMAGE} --load"
+            P2P_PKG_IMAGE_REF="${P2P_PKG_IMAGE}@${P2P_PKG_DIGEST}" \
+            TARGET_ARGS="--build-arg=P2P_PKG_IMAGE_REF=${P2P_PKG_IMAGE}@${P2P_PKG_DIGEST} --tag=${P2P_SYSEXT_IMAGE} --load"
 
       - name: save-sysext-image
         run: |
@@ -433,9 +453,15 @@ jobs:
         with:
           name: build-refs
 
+      - name: download-base-digests
+        uses: actions/download-artifact@v4
+        with:
+          name: base-digests
+
       - name: load-build-refs
         run: |
           cat build-refs.env >> "$GITHUB_ENV"
+          cat base-digests.env >> "$GITHUB_ENV"
 
       - name: download-sysext-image
         uses: actions/download-artifact@v4
@@ -473,6 +499,11 @@ jobs:
         run: |
           python3 -m pip install --user PyYAML
 
+      - name: install-system-dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y kmod squashfs-tools
+
       - name: set-up-docker-buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
 
@@ -488,9 +519,15 @@ jobs:
         with:
           name: build-refs
 
+      - name: download-base-digests
+        uses: actions/download-artifact@v4
+        with:
+          name: base-digests
+
       - name: load-build-refs
         run: |
           cat build-refs.env >> "$GITHUB_ENV"
+          cat base-digests.env >> "$GITHUB_ENV"
 
       - name: resolve-published-digests
         run: |
@@ -502,27 +539,34 @@ jobs:
             printf '%s' "$digest"
           }
 
+          EXPECTED_KERNEL_DIGEST="$KERNEL_DIGEST"
+          EXPECTED_INSTALLER_BASE_DIGEST="$INSTALLER_BASE_DIGEST"
+          EXPECTED_P2P_PKG_DIGEST="$P2P_PKG_DIGEST"
           KERNEL_DIGEST="$(image_digest "$KERNEL_IMAGE")"
           INSTALLER_BASE_DIGEST="$(image_digest "$INSTALLER_BASE_IMAGE")"
           P2P_PKG_DIGEST="$(image_digest "$P2P_PKG_IMAGE")"
+          test "$KERNEL_DIGEST" = "$EXPECTED_KERNEL_DIGEST"
+          test "$INSTALLER_BASE_DIGEST" = "$EXPECTED_INSTALLER_BASE_DIGEST"
+          test "$P2P_PKG_DIGEST" = "$EXPECTED_P2P_PKG_DIGEST"
           P2P_SYSEXT_DIGEST="$(image_digest "$P2P_SYSEXT_IMAGE")"
-          TOOLKIT_SYSEXT_DIGEST="$(image_digest "$TOOLKIT_SYSEXT_IMAGE")"
-
+          IMAGER_DIGEST="$(image_digest "ghcr.io/siderolabs/imager:${TALOS_VERSION}")"
           {
             echo "KERNEL_DIGEST=$KERNEL_DIGEST"
             echo "INSTALLER_BASE_DIGEST=$INSTALLER_BASE_DIGEST"
             echo "P2P_PKG_DIGEST=$P2P_PKG_DIGEST"
             echo "P2P_SYSEXT_DIGEST=$P2P_SYSEXT_DIGEST"
-            echo "TOOLKIT_SYSEXT_DIGEST=$TOOLKIT_SYSEXT_DIGEST"
+            echo "IMAGER_DIGEST=$IMAGER_DIGEST"
+            echo "IMAGER_IMAGE=ghcr.io/siderolabs/imager:${TALOS_VERSION}@${IMAGER_DIGEST}"
             echo "CUSTOM_SYSEXT_IMAGE=${P2P_SYSEXT_IMAGE}@${P2P_SYSEXT_DIGEST}"
-            echo "CUSTOM_TOOLKIT_IMAGE=${TOOLKIT_SYSEXT_IMAGE}@${TOOLKIT_SYSEXT_DIGEST}"
           } >> "$GITHUB_ENV"
 
       - name: build-final-installer
         run: |
           CUSTOM_SYSEXT_IMAGE="$CUSTOM_SYSEXT_IMAGE" \
-          CUSTOM_TOOLKIT_IMAGE="$CUSTOM_TOOLKIT_IMAGE" \
-          BASE_INSTALLER_IMAGE="$INSTALLER_BASE_IMAGE" \
+          IMAGER_IMAGE="$IMAGER_IMAGE" \
+          BASE_INSTALLER_IMAGE="${INSTALLER_BASE_IMAGE}@${INSTALLER_BASE_DIGEST}" \
+          SAMEKEY_KERNEL_IMAGE="${KERNEL_IMAGE}@${KERNEL_DIGEST}" \
+          P2P_PKG_IMAGE="${P2P_PKG_IMAGE}@${P2P_PKG_DIGEST}" \
           INSTALLER_IMAGE_REPO="$INSTALLER_IMAGE_REPO" \
           INSTALLER_IMAGE_TAG="$RELEASE_TAG" \
           INSTALLER_SOURCE_LABEL="https://github.com/${{ github.repository }}" \
@@ -537,9 +581,9 @@ jobs:
             echo "INSTALLER_BASE_DIGEST=${INSTALLER_BASE_DIGEST}"
             echo "P2P_PKG_DIGEST=${P2P_PKG_DIGEST}"
             echo "P2P_SYSEXT_DIGEST=${P2P_SYSEXT_DIGEST}"
-            echo "TOOLKIT_SYSEXT_DIGEST=${TOOLKIT_SYSEXT_DIGEST}"
+            echo "IMAGER_DIGEST=${IMAGER_DIGEST}"
+            echo "IMAGER_IMAGE=${IMAGER_IMAGE}"
             echo "CUSTOM_SYSEXT_IMAGE=${CUSTOM_SYSEXT_IMAGE}"
-            echo "CUSTOM_TOOLKIT_IMAGE=${CUSTOM_TOOLKIT_IMAGE}"
           } > /tmp/digest-refs.env
 
       - name: save-installer-image
@@ -597,6 +641,19 @@ jobs:
           zstd -d -c /tmp/installer.tar.zst | docker load
           docker push "$INSTALLER_IMAGE"
 
+      - name: resolve-final-installer-digest
+        run: |
+          INSTALLER_DIGEST="$(docker buildx imagetools inspect "$INSTALLER_IMAGE" | sed -n 's/^Digest:[[:space:]]*//p' | head -n1)"
+          test -n "$INSTALLER_DIGEST"
+          echo "INSTALLER_DIGEST=$INSTALLER_DIGEST" > /tmp/installer-digest.env
+
+      - name: upload-installer-digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-digest
+          path: /tmp/installer-digest.env
+          retention-days: 1
+
   # ── Phase 7: Verify and publish summary ─────────────────────────────
   verify:
     needs: [push-installer]
@@ -610,6 +667,11 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
+
+      - name: install-system-dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y kmod squashfs-tools
 
       - name: set-up-docker-buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
@@ -639,28 +701,181 @@ jobs:
         run: |
           cat digest-refs.env >> "$GITHUB_ENV"
 
-      - name: resolve-final-installer-digest
+      - name: download-installer-digest
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-digest
+
+      - name: load-installer-digest
         run: |
-          INSTALLER_DIGEST="$(docker buildx imagetools inspect "$INSTALLER_IMAGE" | sed -n 's/^Digest:[[:space:]]*//p' | head -n1)"
-          test -n "$INSTALLER_DIGEST"
-          echo "INSTALLER_DIGEST=$INSTALLER_DIGEST" >> "$GITHUB_ENV"
+          cat installer-digest.env >> "$GITHUB_ENV"
 
       - name: verify-final-installer
         run: |
+          set -euo pipefail
+
           installer_digest_ref="${INSTALLER_IMAGE}@${INSTALLER_DIGEST}"
           installer_pull_ref="${INSTALLER_IMAGE_REPO}"
+          kernel_digest_ref="${KERNEL_IMAGE}@${KERNEL_DIGEST}"
+          p2p_pkg_digest_ref="${P2P_PKG_IMAGE}@${P2P_PKG_DIGEST}"
+          container_id=""
+          kernel_container_id=""
+          pkg_container_id=""
+          verify_dir="$(mktemp -d)"
+
+          cleanup() {
+            if [ -n "$container_id" ]; then
+              docker rm "$container_id" >/dev/null 2>&1 || true
+            fi
+            if [ -n "$kernel_container_id" ]; then
+              docker rm "$kernel_container_id" >/dev/null 2>&1 || true
+            fi
+            if [ -n "$pkg_container_id" ]; then
+              docker rm "$pkg_container_id" >/dev/null 2>&1 || true
+            fi
+            rm -rf "$verify_dir"
+          }
+
+          extract_initrd_rootfs() {
+            local initrd_path="$1"
+            local output_path="$2"
+
+            python3 - "$initrd_path" "$output_path" <<'PY'
+          import lzma
+          import subprocess
+          import sys
+          from pathlib import Path
+
+
+          def align(value: int) -> int:
+              return (value + 3) & ~3
+
+
+          initrd_path = Path(sys.argv[1])
+          output_path = Path(sys.argv[2])
+          data = initrd_path.read_bytes()
+
+          if data.startswith(b"\x28\xb5\x2f\xfd"):
+              data = subprocess.run(
+                  ["zstd", "-q", "-d", "-c", str(initrd_path)],
+                  check=True,
+                  stdout=subprocess.PIPE,
+              ).stdout
+          elif data.startswith(b"\xfd7zXZ\x00"):
+              data = lzma.decompress(data)
+
+          offset = 0
+          while offset + 110 <= len(data):
+              if data[offset:offset + 6] != b"070701":
+                  raise SystemExit(f"bad cpio magic at offset {offset}")
+
+              fields = [
+                  int(data[offset + 6 + index:offset + 14 + index], 16)
+                  for index in range(0, 13 * 8, 8)
+              ]
+              header_end = offset + 110
+              namesize = fields[11]
+              filesize = fields[6]
+              name = data[header_end:header_end + namesize - 1].decode("utf-8")
+              offset = align(header_end + namesize)
+              filedata = data[offset:offset + filesize]
+              offset = align(offset + filesize)
+
+              if name == "TRAILER!!!":
+                  raise SystemExit("rootfs.sqsh not found in UKI initrd")
+
+              if name == "rootfs.sqsh":
+                  output_path.write_bytes(filedata)
+                  break
+          else:
+              raise SystemExit("TRAILER!!! not found in UKI initrd")
+          PY
+          }
+
+          trap cleanup EXIT
 
           printf 'pulling installer image by digest %s\n' "$installer_digest_ref"
           docker pull "${installer_pull_ref}@${INSTALLER_DIGEST}" >/dev/null
+          printf 'pulling kernel image by digest %s\n' "$kernel_digest_ref"
+          docker pull "$kernel_digest_ref" >/dev/null
+          printf 'pulling P2P pkg image by digest %s\n' "$p2p_pkg_digest_ref"
+          docker pull "$p2p_pkg_digest_ref" >/dev/null
+
+          kernel_container_id="$(docker create "$kernel_digest_ref" sh)"
+          docker cp "$kernel_container_id:/boot/vmlinuz" "$verify_dir/kernel-vmlinuz"
+          docker rm "$kernel_container_id" >/dev/null
+          kernel_container_id=""
 
           container_id="$(docker create "$installer_digest_ref")"
-          verify_dir="$(mktemp -d)"
-
+          docker cp "$container_id:/usr/install/${ARCH}/vmlinuz" "$verify_dir/vmlinuz"
+          docker cp "$container_id:/usr/install/${ARCH}/initramfs.xz" "$verify_dir/initramfs.xz"
           docker cp "$container_id:/usr/install/${ARCH}/vmlinuz.efi" "$verify_dir/vmlinuz.efi"
           docker rm "$container_id" >/dev/null
+          container_id=""
 
           chmod 644 "$verify_dir/vmlinuz.efi"
+          objcopy --dump-section .linux="$verify_dir/uki-linux" "$verify_dir/vmlinuz.efi"
           objcopy --dump-section .initrd="$verify_dir/initrd.bin" "$verify_dir/vmlinuz.efi"
+
+          if ! cmp -s "$verify_dir/vmlinuz" "$verify_dir/uki-linux"; then
+            echo "error: final installer vmlinuz differs from final UKI .linux" >&2
+            exit 1
+          fi
+
+          if ! cmp -s "$verify_dir/kernel-vmlinuz" "$verify_dir/uki-linux"; then
+            echo "error: final UKI .linux differs from the same-key kernel image" >&2
+            exit 1
+          fi
+
+          extract_initrd_rootfs "$verify_dir/initrd.bin" "$verify_dir/rootfs.sqsh"
+          extract_initrd_rootfs "$verify_dir/initramfs.xz" "$verify_dir/initramfs-rootfs.sqsh"
+          if ! cmp -s "$verify_dir/rootfs.sqsh" "$verify_dir/initramfs-rootfs.sqsh"; then
+            echo "error: final installer initramfs.xz rootfs differs from final UKI .initrd rootfs" >&2
+            exit 1
+          fi
+
+          if ! unsquashfs -cat "$verify_dir/rootfs.sqsh" usr/lib/systemd/network/99-default.link >/dev/null 2>&1; then
+            echo "error: final UKI rootfs.sqsh is missing usr/lib/systemd/network/99-default.link" >&2
+            exit 1
+          fi
+
+          unsquashfs -no-xattrs -f -d "$verify_dir/rootfs-modules" "$verify_dir/rootfs.sqsh" usr/lib/modules >/dev/null
+          ahci_path="$(find "$verify_dir/rootfs-modules" -name 'ahci.ko' -print -quit)"
+          if [ -z "$ahci_path" ]; then
+            echo "error: could not find ahci.ko in final UKI rootfs.sqsh" >&2
+            exit 1
+          fi
+
+          pkg_container_id="$(docker create "$p2p_pkg_digest_ref" sh)"
+          docker cp "$pkg_container_id:/usr/lib/modules" "$verify_dir/p2p-pkg-modules"
+          docker rm "$pkg_container_id" >/dev/null
+          pkg_container_id=""
+
+          nvidia_path="$(find "$verify_dir/p2p-pkg-modules" -name 'nvidia.ko' -print -quit)"
+          if [ -z "$nvidia_path" ]; then
+            echo "error: could not find nvidia.ko in '$p2p_pkg_digest_ref'" >&2
+            exit 1
+          fi
+
+          ahci_signer="$(modinfo -F signer "$ahci_path")"
+          ahci_sig_key="$(modinfo -F sig_key "$ahci_path")"
+          nvidia_signer="$(modinfo -F signer "$nvidia_path")"
+          nvidia_sig_key="$(modinfo -F sig_key "$nvidia_path")"
+
+          printf 'final rootfs ahci signer: %s\n' "$ahci_signer"
+          printf 'final rootfs ahci sig_key: %s\n' "$ahci_sig_key"
+          printf 'p2p pkg nvidia signer: %s\n' "$nvidia_signer"
+          printf 'p2p pkg nvidia sig_key: %s\n' "$nvidia_sig_key"
+
+          if [ -z "$ahci_sig_key" ] || [ -z "$nvidia_sig_key" ]; then
+            echo "error: missing module signing key metadata in final rootfs or P2P pkg" >&2
+            exit 1
+          fi
+
+          if [ "$ahci_sig_key" != "$nvidia_sig_key" ]; then
+            echo "error: final rootfs ahci.ko and P2P pkg nvidia.ko were signed by different keys" >&2
+            exit 1
+          fi
 
           extension_names="$(python3 - "$verify_dir/initrd.bin" <<'PY'
           import lzma
@@ -704,10 +919,13 @@ jobs:
           fi
 
           printf 'verified installer image: %s\n' "$installer_digest_ref"
+          printf 'verified installer vmlinuz matches UKI .linux\n'
+          printf 'verified final UKI .linux matches same-key kernel image\n'
+          printf 'verified final installer initramfs.xz rootfs matches UKI .initrd rootfs\n'
+          printf 'verified final UKI rootfs contains usr/lib/systemd/network/99-default.link\n'
+          printf 'verified final rootfs and P2P pkg shared signing key: %s\n' "$ahci_sig_key"
           printf 'verified included extensions:\n%s\n' "$extension_names"
           printf 'verified excluded extension: nvidia-open-gpu-kernel-modules-production\n'
-
-          rm -rf "$verify_dir"
 
       - name: publish-summary
         run: |
@@ -718,7 +936,7 @@ jobs:
           - installer-base image: `${INSTALLER_BASE_IMAGE}@${INSTALLER_BASE_DIGEST}`
           - nvidia-modules-p2p-production-pkg: `${P2P_PKG_IMAGE}@${P2P_PKG_DIGEST}`
           - nvidia-modules-p2p-production: `${P2P_SYSEXT_IMAGE}@${P2P_SYSEXT_DIGEST}`
-          - nvidia-container-toolkit-production: `${TOOLKIT_SYSEXT_IMAGE}@${TOOLKIT_SYSEXT_DIGEST}`
+          - Talos imager: `${IMAGER_IMAGE}`
           - final installer image: `${INSTALLER_IMAGE}@${INSTALLER_DIGEST}`
 
           Build tag: `${BUILD_TAG}`

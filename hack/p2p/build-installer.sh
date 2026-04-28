@@ -11,6 +11,7 @@ usage() {
   echo "Optional env: IMAGER_IMAGE=<image-ref>" >&2
   echo "Optional env: BASE_INSTALLER_IMAGE=<image-ref>" >&2
   echo "Optional env: SAMEKEY_KERNEL_IMAGE=<image-ref>" >&2
+  echo "Optional env: P2P_PKG_IMAGE=<image-ref>" >&2
   echo "Optional env: CUSTOM_SYSEXT_IMAGE=<digest-pinned-image-ref>" >&2
   echo "Optional env: CUSTOM_TOOLKIT_IMAGE=<digest-pinned-image-ref>" >&2
   echo "Optional env: INSTALLER_SOURCE_LABEL=<oci-source-url>" >&2
@@ -50,6 +51,312 @@ push_with_retry() {
   done
 }
 
+ensure_image_available() {
+  local image_ref="$1"
+
+  if docker image inspect "$image_ref" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  docker pull "$image_ref" >/dev/null
+}
+
+extract_initrd_rootfs() {
+  local initrd_path="$1"
+  local output_path="$2"
+
+  python3 - "$initrd_path" "$output_path" <<'PY'
+import lzma
+import subprocess
+import sys
+from pathlib import Path
+
+
+def align(value: int) -> int:
+    return (value + 3) & ~3
+
+
+initrd_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+data = initrd_path.read_bytes()
+
+if data.startswith(b"\x28\xb5\x2f\xfd"):
+    data = subprocess.run(
+        ["zstd", "-q", "-d", "-c", str(initrd_path)],
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+elif data.startswith(b"\xfd7zXZ\x00"):
+    data = lzma.decompress(data)
+
+offset = 0
+while offset + 110 <= len(data):
+    if data[offset:offset + 6] != b"070701":
+        raise SystemExit(f"bad cpio magic at offset {offset}")
+
+    fields = [
+        int(data[offset + 6 + index:offset + 14 + index], 16)
+        for index in range(0, 13 * 8, 8)
+    ]
+    header_end = offset + 110
+    namesize = fields[11]
+    filesize = fields[6]
+    name = data[header_end:header_end + namesize - 1].decode("utf-8")
+    offset = align(header_end + namesize)
+    filedata = data[offset:offset + filesize]
+    offset = align(offset + filesize)
+
+    if name == "TRAILER!!!":
+        raise SystemExit("rootfs.sqsh not found in UKI initrd")
+
+    if name == "rootfs.sqsh":
+        output_path.write_bytes(filedata)
+        break
+else:
+    raise SystemExit("TRAILER!!! not found in UKI initrd")
+PY
+}
+
+replace_initrd_rootfs() {
+  local current_raw_path="$1"
+  local replacement_rootfs_path="$2"
+  local output_raw_path="$3"
+
+  python3 - "$current_raw_path" "$replacement_rootfs_path" "$output_raw_path" <<'PY'
+import sys
+from pathlib import Path
+
+
+def align(value: int) -> int:
+    return (value + 3) & ~3
+
+
+def parse_first_archive(data: bytes):
+    offset = 0
+    entries = []
+
+    while offset + 110 <= len(data):
+        if data[offset:offset + 6] != b"070701":
+            raise SystemExit(f"bad cpio magic at offset {offset}")
+
+        fields = [
+            int(data[offset + 6 + index:offset + 14 + index], 16)
+            for index in range(0, 13 * 8, 8)
+        ]
+        header_end = offset + 110
+        namesize = fields[11]
+        filesize = fields[6]
+        name = data[header_end:header_end + namesize - 1].decode("utf-8")
+        offset = align(header_end + namesize)
+        filedata = data[offset:offset + filesize]
+        offset = align(offset + filesize)
+
+        entries.append((name, fields, filedata))
+
+        if name == "TRAILER!!!":
+            return entries, data[offset:]
+
+    raise SystemExit("TRAILER!!! not found in initrd archive")
+
+
+def write_archive(entries) -> bytes:
+    output = bytearray()
+    for name, fields, filedata in entries:
+        encoded_name = name.encode("utf-8") + b"\x00"
+        namesize = len(encoded_name)
+        fields = list(fields)
+        fields[6] = len(filedata)
+        fields[11] = namesize
+        header = "070701" + "".join(f"{field:08x}" for field in fields)
+        output.extend(header.encode("ascii"))
+        output.extend(encoded_name)
+        output.extend(b"\x00" * ((4 - ((110 + namesize) % 4)) % 4))
+        output.extend(filedata)
+        output.extend(b"\x00" * ((4 - (len(filedata) % 4)) % 4))
+    return bytes(output)
+
+
+current_raw_path = Path(sys.argv[1])
+replacement_rootfs_path = Path(sys.argv[2])
+output_raw_path = Path(sys.argv[3])
+
+current_raw = current_raw_path.read_bytes()
+replacement_rootfs = replacement_rootfs_path.read_bytes()
+entries, trailing_data = parse_first_archive(current_raw)
+replaced = False
+
+rebuilt_entries = []
+for name, fields, filedata in entries:
+    if name == "rootfs.sqsh":
+        filedata = replacement_rootfs
+        replaced = True
+    rebuilt_entries.append((name, fields, filedata))
+
+if not replaced:
+    raise SystemExit("rootfs.sqsh not found in initrd archive")
+
+output_raw_path.write_bytes(write_archive(rebuilt_entries) + trailing_data)
+PY
+}
+
+replace_rootfs_modules_with_kernel_modules() {
+  local rootfs_path="$1"
+  local kernel_image_ref="$2"
+  local working_dir="$3"
+  local output_path="$4"
+  local rootfs_dir="$working_dir/rootfs"
+  local samekey_modules_dir="$working_dir/samekey-modules"
+
+  rm -rf "$rootfs_dir" "$samekey_modules_dir" "$output_path"
+  mkdir -p "$working_dir"
+
+  unsquashfs -no-xattrs -f -d "$rootfs_dir" "$rootfs_path" >/dev/null
+  chmod -R u+rwX "$rootfs_dir"
+
+  base_container_id="$(docker create "$kernel_image_ref" sh)"
+  docker cp "$base_container_id:/usr/lib/modules" "$samekey_modules_dir"
+  docker rm "$base_container_id" >/dev/null
+  base_container_id=""
+
+  if [ ! -d "$samekey_modules_dir" ]; then
+    fail "could not extract same-key modules from '$kernel_image_ref'"
+  fi
+
+  rm -rf "$rootfs_dir/usr/lib/modules"
+  mkdir -p "$rootfs_dir/usr/lib"
+  cp -a "$samekey_modules_dir" "$rootfs_dir/usr/lib/modules"
+
+  mksquashfs "$rootfs_dir" "$output_path" \
+    -all-root \
+    -comp zstd \
+    -Xcompression-level 18 \
+    -b 131072 \
+    -noappend \
+    -quiet \
+    >/dev/null
+}
+
+verify_rootfs_default_link() {
+  local rootfs_path="$1"
+
+  if ! unsquashfs -cat "$rootfs_path" usr/lib/systemd/network/99-default.link >/dev/null 2>&1; then
+    fail "final UKI rootfs.sqsh is missing usr/lib/systemd/network/99-default.link"
+  fi
+
+  printf 'verified final UKI rootfs contains usr/lib/systemd/network/99-default.link\n'
+}
+
+extract_ahci_from_rootfs() {
+  local rootfs_path="$1"
+  local output_dir="$2"
+
+  rm -rf "$output_dir"
+  mkdir -p "$output_dir"
+  unsquashfs -no-xattrs -f -d "$output_dir" "$rootfs_path" usr/lib/modules >/dev/null
+  extracted_ahci_path="$(find "$output_dir" -name 'ahci.ko' -print -quit)"
+
+  if [ -z "$extracted_ahci_path" ]; then
+    fail "could not find ahci.ko in final UKI rootfs.sqsh"
+  fi
+}
+
+extract_nvidia_from_p2p_pkg() {
+  local output_dir="$1"
+
+  rm -rf "$output_dir"
+  mkdir -p "$output_dir"
+  ensure_image_available "$p2p_pkg_ref"
+  pkg_container_id="$(docker create "$p2p_pkg_ref" sh)"
+  docker cp "$pkg_container_id:/usr/lib/modules" "$output_dir/modules"
+  docker rm "$pkg_container_id" >/dev/null
+  pkg_container_id=""
+  extracted_nvidia_path="$(find "$output_dir/modules" -name 'nvidia.ko' -print -quit)"
+
+  if [ -z "$extracted_nvidia_path" ]; then
+    fail "could not find nvidia.ko in '$p2p_pkg_ref'"
+  fi
+}
+
+verify_p2p_pkg_signing_key() {
+  local rootfs_path="$1"
+  local working_dir="$2"
+  local ahci_signer
+  local ahci_sig_key
+  local nvidia_signer
+  local nvidia_sig_key
+
+  extracted_ahci_path=""
+  extracted_nvidia_path=""
+  extract_ahci_from_rootfs "$rootfs_path" "$working_dir/rootfs-modules"
+  extract_nvidia_from_p2p_pkg "$working_dir/p2p-pkg-modules"
+
+  ahci_signer="$(modinfo -F signer "$extracted_ahci_path")"
+  ahci_sig_key="$(modinfo -F sig_key "$extracted_ahci_path")"
+  nvidia_signer="$(modinfo -F signer "$extracted_nvidia_path")"
+  nvidia_sig_key="$(modinfo -F sig_key "$extracted_nvidia_path")"
+
+  printf 'final rootfs ahci signer: %s\n' "$ahci_signer"
+  printf 'final rootfs ahci sig_key: %s\n' "$ahci_sig_key"
+  printf 'p2p pkg nvidia signer: %s\n' "$nvidia_signer"
+  printf 'p2p pkg nvidia sig_key: %s\n' "$nvidia_sig_key"
+
+  if [ -z "$ahci_sig_key" ] || [ -z "$nvidia_sig_key" ]; then
+    fail "missing module signing key metadata in final rootfs or P2P pkg"
+  fi
+
+  if [ "$ahci_sig_key" != "$nvidia_sig_key" ]; then
+    fail "final rootfs ahci.ko and P2P pkg nvidia.ko were signed by different keys"
+  fi
+
+  printf 'verified final rootfs and P2P pkg shared signing key: %s\n' "$ahci_sig_key"
+}
+
+verify_final_installer_image() {
+  local image_ref="$1"
+  local selected_vmlinuz_path="$2"
+  local check_dir="$3"
+
+  rm -rf "$check_dir"
+  mkdir -p "$check_dir"
+
+  container_id="$(docker create "$image_ref")"
+  docker cp "$container_id:/usr/install/${arch}/vmlinuz" "$check_dir/vmlinuz"
+  docker cp "$container_id:/usr/install/${arch}/initramfs.xz" "$check_dir/initramfs.xz"
+  docker cp "$container_id:/usr/install/${arch}/vmlinuz.efi" "$check_dir/vmlinuz.efi"
+  docker rm "$container_id" >/dev/null
+  container_id=""
+
+  chmod 644 "$check_dir/vmlinuz.efi"
+  objcopy --dump-section .linux="$check_dir/uki-linux" "$check_dir/vmlinuz.efi"
+  objcopy --dump-section .initrd="$check_dir/uki-initrd.bin" "$check_dir/vmlinuz.efi"
+
+  if ! cmp -s "$check_dir/vmlinuz" "$check_dir/uki-linux"; then
+    fail "final installer vmlinuz differs from final UKI .linux in '$image_ref'"
+  fi
+
+  if ! cmp -s "$check_dir/uki-linux" "$selected_vmlinuz_path"; then
+    fail "final UKI .linux differs from the selected same-key kernel in '$image_ref'"
+  fi
+
+  printf 'verified final installer vmlinuz matches UKI .linux\n'
+  printf 'verified final UKI .linux matches selected same-key kernel\n'
+
+  extract_initrd_rootfs "$check_dir/uki-initrd.bin" "$check_dir/rootfs.sqsh"
+  extract_initrd_rootfs "$check_dir/initramfs.xz" "$check_dir/initramfs-rootfs.sqsh"
+  if ! cmp -s "$check_dir/rootfs.sqsh" "$check_dir/initramfs-rootfs.sqsh"; then
+    fail "final installer initramfs.xz rootfs differs from final UKI .initrd rootfs"
+  fi
+
+  printf 'verified final installer initramfs.xz rootfs matches UKI .initrd rootfs\n'
+  verify_rootfs_default_link "$check_dir/rootfs.sqsh"
+
+  if [ -n "$p2p_pkg_ref" ]; then
+    verify_p2p_pkg_signing_key "$check_dir/rootfs.sqsh" "$check_dir"
+  fi
+
+  printf 'verified final installer image lineage: %s\n' "$image_ref"
+}
+
 if [ "$#" -gt 1 ]; then
   usage
 fi
@@ -62,7 +369,7 @@ if [ ! -f "$matrix_path" ]; then
   fail "release matrix not found at '$matrix_path'"
 fi
 
-for cmd in docker python3 objcopy objdump zstd xz grep mktemp; do
+for cmd in docker python3 objcopy objdump zstd xz grep mktemp unsquashfs mksquashfs cmp find cp chmod; do
   require_command "$cmd"
 done
 
@@ -186,6 +493,7 @@ installer_source_label="${INSTALLER_SOURCE_LABEL:-https://github.com/${origin_re
 imager_image="${IMAGER_IMAGE:-ghcr.io/siderolabs/imager:${target_talos_version}}"
 base_installer_ref="${BASE_INSTALLER_IMAGE:-ghcr.io/siderolabs/installer-base:${target_talos_version}}"
 samekey_kernel_ref="${SAMEKEY_KERNEL_IMAGE:-}"
+p2p_pkg_ref="${P2P_PKG_IMAGE:-}"
 push_installer=true
 case "${PUSH_INSTALLER:-true}" in
   0|false|no|False|No) push_installer=false ;;
@@ -195,9 +503,18 @@ extra_system_extension_refs=()
 extra_kernel_arg="${EXTRA_KERNEL_ARG:-}"
 extra_kernel_args=()
 
+if [ -n "$p2p_pkg_ref" ]; then
+  require_command modinfo
+fi
+
+if [ "${GITHUB_ACTIONS:-}" = true ] && [[ "$imager_image" != *@sha256:* ]]; then
+  fail "IMAGER_IMAGE must be digest-pinned in GitHub Actions"
+fi
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/talos-installer-build-XXXXXX")"
 container_id=""
 base_container_id=""
+pkg_container_id=""
 
 cleanup() {
   if [ -n "$container_id" ]; then
@@ -205,6 +522,9 @@ cleanup() {
   fi
   if [ -n "$base_container_id" ]; then
     docker rm "$base_container_id" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$pkg_container_id" ]; then
+    docker rm "$pkg_container_id" >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp_dir"
 }
@@ -314,7 +634,6 @@ fi
 
 container_id="$(docker create "$loaded_image_id")"
 docker cp "$container_id:/usr/install/${arch}/vmlinuz" "$verify_dir/imager-vmlinuz"
-docker cp "$container_id:/usr/install/${arch}/initramfs.xz" "$verify_dir/initramfs.xz"
 docker cp "$container_id:/usr/install/${arch}/vmlinuz.efi" "$relabel_dir/vmlinuz.efi"
 docker rm "$container_id" >/dev/null
 container_id=""
@@ -390,47 +709,6 @@ else:
     raise SystemExit(f"section {section_name} not found in {binary_path}")
 PY
 )"
-
-xz -q -d -f -k "$verify_dir/initramfs.xz"
-python3 - "$verify_dir/initramfs" "$verify_dir/rootfs.sqsh" <<'PY'
-from pathlib import Path
-import sys
-
-
-def align(value: int) -> int:
-    return (value + 3) & ~3
-
-
-archive_path = Path(sys.argv[1])
-output_path = Path(sys.argv[2])
-data = archive_path.read_bytes()
-offset = 0
-
-while offset + 110 <= len(data):
-    if data[offset:offset + 6] != b"070701":
-        raise SystemExit(f"bad cpio magic at offset {offset}")
-
-    fields = [
-        int(data[offset + 6 + index:offset + 14 + index], 16)
-        for index in range(0, 13 * 8, 8)
-    ]
-    namesize = fields[11]
-    filesize = fields[6]
-    header_end = offset + 110
-    name = data[header_end:header_end + namesize - 1].decode("utf-8")
-    offset = align(header_end + namesize)
-    filedata = data[offset:offset + filesize]
-    offset = align(offset + filesize)
-
-    if name == "TRAILER!!!":
-        break
-
-    if name == "rootfs.sqsh":
-        output_path.write_bytes(filedata)
-        break
-else:
-    raise SystemExit("rootfs.sqsh not found in raw initramfs")
-PY
 
 objcopy --dump-section .cmdline="$verify_dir/cmdline.bin" "$relabel_dir/vmlinuz.efi"
 
@@ -539,142 +817,25 @@ overlay_order_names=("${overlay_verification[@]:1}")
 printf 'verified installer overlay order:\n'
 printf ' - %s\n' "${overlay_order_names[@]}"
 
-python3 - "$verify_dir/current-initrd.raw" "$verify_dir/rootfs.sqsh" "$relabel_dir/initrd.raw" <<'PY'
-from dataclasses import dataclass
-from pathlib import Path
-import sys
+extract_initrd_rootfs "$verify_dir/current-initrd.zst" "$verify_dir/current-rootfs.sqsh"
 
+if [ -n "$samekey_kernel_ref" ]; then
+  printf 'replacing imager rootfs modules with same-key kernel modules\n'
+  replace_rootfs_modules_with_kernel_modules \
+    "$verify_dir/current-rootfs.sqsh" \
+    "$samekey_kernel_ref" \
+    "$verify_dir/rootfs-rebuild" \
+    "$verify_dir/rebuilt-rootfs.sqsh"
+else
+  cp "$verify_dir/current-rootfs.sqsh" "$verify_dir/rebuilt-rootfs.sqsh"
+fi
 
-def align(value: int) -> int:
-    return (value + 3) & ~3
-
-
-@dataclass
-class CpioEntry:
-    name: str
-    ino: int
-    mode: int
-    uid: int
-    gid: int
-    nlink: int
-    mtime: int
-    filesize: int
-    devmajor: int
-    devminor: int
-    rdevmajor: int
-    rdevminor: int
-    check: int
-    data: bytes
-
-
-def parse_archive(path: Path) -> tuple[list[CpioEntry], bytes]:
-    data = path.read_bytes()
-    offset = 0
-    entries: list[CpioEntry] = []
-
-    while offset + 110 <= len(data):
-        if data[offset:offset + 6] != b"070701":
-            raise SystemExit(f"bad cpio magic at offset {offset}")
-
-        fields = [
-            int(data[offset + 6 + index:offset + 14 + index], 16)
-            for index in range(0, 13 * 8, 8)
-        ]
-        header_end = offset + 110
-        namesize = fields[11]
-        name = data[header_end:header_end + namesize - 1].decode("utf-8")
-        offset = align(header_end + namesize)
-        filesize = fields[6]
-        filedata = data[offset:offset + filesize]
-        offset = align(offset + filesize)
-
-        if name == "TRAILER!!!":
-            return entries, data[offset:]
-
-        entries.append(
-            CpioEntry(
-                name=name,
-                ino=fields[0],
-                mode=fields[1],
-                uid=fields[2],
-                gid=fields[3],
-                nlink=fields[4],
-                mtime=fields[5],
-                filesize=filesize,
-                devmajor=fields[7],
-                devminor=fields[8],
-                rdevmajor=fields[9],
-                rdevminor=fields[10],
-                check=fields[12],
-                data=filedata,
-            )
-        )
-
-    raise SystemExit("TRAILER!!! not found in UKI initrd")
-
-
-def write_archive(path: Path, entries: list[CpioEntry], trailing_data: bytes) -> None:
-    with path.open("wb") as stream:
-        for entry in entries:
-            encoded_name = entry.name.encode("utf-8") + b"\0"
-            filesize = len(entry.data)
-            header = (
-                b"070701"
-                + f"{entry.ino:08x}".encode("ascii")
-                + f"{entry.mode:08x}".encode("ascii")
-                + f"{entry.uid:08x}".encode("ascii")
-                + f"{entry.gid:08x}".encode("ascii")
-                + f"{entry.nlink:08x}".encode("ascii")
-                + f"{entry.mtime:08x}".encode("ascii")
-                + f"{filesize:08x}".encode("ascii")
-                + f"{entry.devmajor:08x}".encode("ascii")
-                + f"{entry.devminor:08x}".encode("ascii")
-                + f"{entry.rdevmajor:08x}".encode("ascii")
-                + f"{entry.rdevminor:08x}".encode("ascii")
-                + f"{len(encoded_name):08x}".encode("ascii")
-                + f"{entry.check:08x}".encode("ascii")
-            )
-            stream.write(header)
-            stream.write(encoded_name)
-            stream.write(b"\0" * (align(len(header) + len(encoded_name)) - (len(header) + len(encoded_name))))
-            stream.write(entry.data)
-            stream.write(b"\0" * (align(filesize) - filesize))
-
-        trailer_name = b"TRAILER!!!\0"
-        trailer_header = (
-            b"070701"
-            + b"00000000" * 11
-            + f"{len(trailer_name):08x}".encode("ascii")
-            + b"00000000"
-        )
-        stream.write(trailer_header)
-        stream.write(trailer_name)
-        stream.write(b"\0" * (align(len(trailer_header) + len(trailer_name)) - (len(trailer_header) + len(trailer_name))))
-        stream.write(trailing_data)
-
-
-current_initrd_path = Path(sys.argv[1])
-replacement_rootfs_path = Path(sys.argv[2])
-output_path = Path(sys.argv[3])
-
-replacement_rootfs = replacement_rootfs_path.read_bytes()
-entries, trailing_data = parse_archive(current_initrd_path)
-updated = False
-
-for entry in entries:
-    if entry.name == "rootfs.sqsh":
-        entry.data = replacement_rootfs
-        entry.filesize = len(replacement_rootfs)
-        updated = True
-        break
-
-if not updated:
-    raise SystemExit("rootfs.sqsh not found in UKI initrd")
-
-write_archive(output_path, entries, trailing_data)
-PY
-
-zstd -q -19 -f "$relabel_dir/initrd.raw" -o "$relabel_dir/initrd.zst"
+replace_initrd_rootfs \
+  "$verify_dir/current-initrd.raw" \
+  "$verify_dir/rebuilt-rootfs.sqsh" \
+  "$verify_dir/rebuilt-initrd.raw"
+zstd -q -19 -f "$verify_dir/rebuilt-initrd.raw" -o "$verify_dir/current-initrd.zst"
+xz -q -9 -c "$verify_dir/rebuilt-initrd.raw" >"$verify_dir/initramfs.xz"
 
 objcopy --remove-section .profile --remove-section .cmdline --remove-section .linux --remove-section .initrd "$relabel_dir/vmlinuz.efi" "$relabel_dir/vmlinuz-stripped.efi"
 objcopy \
@@ -684,7 +845,7 @@ objcopy \
   --add-section .linux="$verify_dir/vmlinuz" \
   --change-section-vma .linux="$linux_vma" \
   --set-section-flags .linux=contents,alloc,load,readonly,data \
-  --add-section .initrd="$relabel_dir/initrd.zst" \
+  --add-section .initrd="$verify_dir/current-initrd.zst" \
   --change-section-vma .initrd="$initrd_vma" \
   --set-section-flags .initrd=contents,alloc,load,readonly,data \
   "$relabel_dir/vmlinuz-stripped.efi" \
@@ -693,7 +854,9 @@ objcopy \
 relabel_base_ref="local-installer-relabel:${target_talos_version}"
 
 cp "$verify_dir/vmlinuz" "$relabel_dir/vmlinuz"
+cp "$verify_dir/initramfs.xz" "$relabel_dir/initramfs.xz"
 chmod 644 "$relabel_dir/vmlinuz"
+chmod 644 "$relabel_dir/initramfs.xz"
 
 printf 'tagging installer base image as %s\n' "$relabel_base_ref"
 docker tag "$loaded_image_id" "$relabel_base_ref"
@@ -701,12 +864,15 @@ docker tag "$loaded_image_id" "$relabel_base_ref"
 cat >"$relabel_dir/Dockerfile" <<EOF
 FROM ${relabel_base_ref}
 COPY vmlinuz /usr/install/${arch}/vmlinuz
+COPY initramfs.xz /usr/install/${arch}/initramfs.xz
 COPY vmlinuz.efi /usr/install/${arch}/vmlinuz.efi
 LABEL org.opencontainers.image.source=${installer_source_label}
 EOF
 
 printf 'relabeling installer image as %s\n' "$installer_image_ref"
 docker build --pull=false --tag "$installer_image_ref" "$relabel_dir" >/dev/null
+
+verify_final_installer_image "$installer_image_ref" "$verify_dir/vmlinuz" "$verify_dir/final-local"
 
 if [ "$push_installer" = false ]; then
   printf 'installer image built locally: %s\n' "$installer_image_ref"
@@ -738,15 +904,9 @@ installer_digest_ref="${installer_image_ref}@${installer_digest}"
 printf 'pulling installer image by digest %s\n' "$installer_digest_ref"
 docker pull "${installer_pull_ref}@${installer_digest}" >/dev/null
 
-container_id="$(docker create "$installer_digest_ref")"
-docker cp "$container_id:/usr/install/${arch}/vmlinuz.efi" "$verify_dir/vmlinuz.efi"
-docker rm "$container_id" >/dev/null
-container_id=""
+verify_final_installer_image "$installer_digest_ref" "$verify_dir/vmlinuz" "$verify_dir/final-pushed"
 
-chmod 644 "$verify_dir/vmlinuz.efi"
-objcopy --dump-section .initrd="$verify_dir/initrd.bin" "$verify_dir/vmlinuz.efi"
-
-extension_names="$(python3 - "$verify_dir/initrd.bin" <<'PY'
+extension_names="$(python3 - "$verify_dir/final-pushed/uki-initrd.bin" <<'PY'
 import lzma
 import re
 import subprocess

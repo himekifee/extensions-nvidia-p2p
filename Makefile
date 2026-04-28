@@ -1,18 +1,19 @@
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2026-03-26T11:27:37Z by kres 3675077.
+# Generated on 2026-04-28T14:29:44Z by kres 980313d.
 
 # common variables
 
 SHA := $(shell git describe --match=none --always --abbrev=8 --dirty)
-TAG := $(shell git describe --tag --always --dirty --match v[0-9]\*)
+TAG ?= $(shell git describe --tag --always --dirty --match v[0-9]\*)
 TAG_SUFFIX ?=
-ABBREV_TAG := $(shell git describe --tags >/dev/null 2>/dev/null && git describe --tag --always --match v[0-9]\* --abbrev=0 || echo 'undefined')
+ABBREV_TAG ?= $(shell git describe --tags >/dev/null 2>/dev/null && git describe --tag --always --match v[0-9]\* --abbrev=0 || echo 'undefined')
 BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
 ARTIFACTS := _out
 IMAGE_TAG ?= $(TAG)$(TAG_SUFFIX)
 OPERATING_SYSTEM := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+CI_RELEASE_TAG := $(shell git log --oneline --format=%B -n 1 HEAD^2 -- 2>/dev/null | head -n 1 | sed -r "/^release\(.*\)/ s/^release\((.*)\):.*$$/\\1/; t; Q")
 REGISTRY ?= ghcr.io
 USERNAME ?= siderolabs
 REGISTRY_AND_USERNAME ?= $(REGISTRY)/$(USERNAME)
@@ -21,8 +22,8 @@ CONFORMANCE_IMAGE ?= ghcr.io/siderolabs/conform:latest
 
 # source date epoch of first commit
 
-INITIAL_COMMIT_SHA ?= $(shell git rev-list --max-parents=0 HEAD 2>/dev/null)
-SOURCE_DATE_EPOCH ?= $(shell if test -n "$(INITIAL_COMMIT_SHA)"; then git log "$(INITIAL_COMMIT_SHA)" --pretty=%ct 2>/dev/null; else stat -c %Y Pkgfile 2>/dev/null || date +%s; fi)
+INITIAL_COMMIT_SHA := $(shell git rev-list --max-parents=0 HEAD)
+SOURCE_DATE_EPOCH := $(shell git log $(INITIAL_COMMIT_SHA) --pretty=%ct)
 
 # sync bldr image with pkgfile
 
@@ -41,6 +42,7 @@ WITH_BUILD_DEBUG ?=
 BUILD_ARGS = --build-arg=SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH)
 BUILD_ARGS += --build-arg=TAG="$(TAG)"
 BUILD_ARGS += --build-arg=PKGS="$(PKGS)"
+BUILD_ARGS += --build-arg=MODULE_SIG_KEY_PEM_B64="$(MODULE_SIG_KEY_PEM_B64)"
 BUILD_ARGS += --build-arg=PKGS_PREFIX="$(PKGS_PREFIX)"
 BUILD_ARGS += --build-arg=TOOLS="$(TOOLS)"
 BUILD_ARGS += --build-arg=TOOLS_PREFIX="$(TOOLS_PREFIX)"
@@ -54,11 +56,11 @@ COMMON_ARGS += $(BUILD_ARGS)
 # extra variables
 
 EXTENSIONS_IMAGE_REF ?= $(REGISTRY_AND_USERNAME)/extensions:$(TAG)
-PKGS ?= v1.13.0-beta.0-5-g142b074
+PKGS ?= v1.13.0
 PKGS_PREFIX ?= ghcr.io/siderolabs
-TOOLS ?= v1.13.0-beta.0-1-g136f1de
+TOOLS ?= v1.13.0
 TOOLS_PREFIX ?= ghcr.io/siderolabs
-IMAGE_SIGNER_RELEASE ?= v0.2.0
+GO_TOOLS_RELEASE ?= v0.3.1
 
 # targets defines all the available targets
 
@@ -207,6 +209,14 @@ $(ARTIFACTS):  ## Creates artifacts directory.
 clean:  ## Cleans up all artifacts.
 	@rm -rf $(ARTIFACTS)
 
+.PHONY: ci-temp-release-tag
+ci-temp-release-tag:  ## Generates a temporary release tag for CI run.
+	@if [ -n "$(CI_RELEASE_TAG)" -a -n "$${GITHUB_ENV}" ]; then \
+		echo Setting temporary release tag "$(CI_RELEASE_TAG)"; \
+		echo "TAG=$(CI_RELEASE_TAG)" >> "$${GITHUB_ENV}"; \
+		echo "ABBREV_TAG=$(CI_RELEASE_TAG)" >> "$${GITHUB_ENV}"; \
+	fi
+
 target-%:  ## Builds the specified target defined in the Pkgfile. The build result will only remain in the build cache.
 	@$(BUILD) --target=$* $(COMMON_ARGS) $(TARGET_ARGS) $(CI_ARGS) .
 
@@ -227,7 +237,7 @@ reproducibility-test-local-%:  ## Builds the specified target defined in the Pkg
 	@diffoscope $(ARTIFACTS)/build-a $(ARTIFACTS)/build-b
 	@rm -rf $(ARTIFACTS)/build-a $(ARTIFACTS)/build-b
 
-$(ARTIFACTS)/bldr: $(ARTIFACTS)  ## Downloads bldr binary.
+$(ARTIFACTS)/bldr: | $(ARTIFACTS)  ## Downloads bldr binary.
 	@curl -sSL https://github.com/siderolabs/bldr/releases/download/$(BLDR_RELEASE)/bldr-$(OPERATING_SYSTEM)-$(GOARCH) -o $(ARTIFACTS)/bldr
 	@chmod +x $(ARTIFACTS)/bldr
 
@@ -279,7 +289,7 @@ internal/extensions/descriptions.yaml: internal/extensions/image-digests
 
 .PHONY: $(ARTIFACTS)/image-signer
 $(ARTIFACTS)/image-signer:
-	@curl -sSL https://github.com/siderolabs/go-tools/releases/download/$(IMAGE_SIGNER_RELEASE)/image-signer-$(OPERATING_SYSTEM)-$(GOARCH) -o $(ARTIFACTS)/image-signer
+	@curl -sSL https://github.com/siderolabs/go-tools/releases/download/$(GO_TOOLS_RELEASE)/image-signer-$(OPERATING_SYSTEM)-$(GOARCH) -o $(ARTIFACTS)/image-signer
 	@chmod +x $(ARTIFACTS)/image-signer
 
 .PHONY: sign-images
@@ -314,3 +324,15 @@ release-notes: $(ARTIFACTS)
 conformance:
 	@docker pull $(CONFORMANCE_IMAGE)
 	@docker run --rm -it -v $(PWD):/src -w /src $(CONFORMANCE_IMAGE) enforce
+
+.PHONY: renovate-local
+renovate-local:  ## runs renovate locally to check syntax and test configuration
+	@docker run --rm \
+		--user $(shell id -u):$(shell id -g) \
+		-v $(PWD):/src \
+		-w /src \
+		-e GITHUB_TOKEN \
+		-e LOG_LEVEL=debug \
+		-e RENOVATE_PLATFORM=local \
+		-e RENOVATE_DRY_RUN=full \
+	renovate/renovate

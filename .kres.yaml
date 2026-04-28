@@ -101,13 +101,15 @@ spec:
       - name: EXTENSIONS_IMAGE_REF
         defaultValue: $(REGISTRY_AND_USERNAME)/extensions:$(TAG)
       - name: PKGS
-        defaultValue: v1.13.0-beta.0-5-g142b074
+        defaultValue: v1.13.0
       - name: PKGS_PREFIX
         defaultValue: ghcr.io/siderolabs
       - name: TOOLS
-        defaultValue: v1.13.0-beta.0-1-g136f1de
+        defaultValue: v1.13.0
       - name: TOOLS_PREFIX
         defaultValue: ghcr.io/siderolabs
+      - name: GO_TOOLS_RELEASE
+        defaultValue: v0.3.1
   useBldrPkgTagResolver: true
 ---
 kind: common.Build
@@ -234,12 +236,9 @@ spec:
   makefile:
     enabled: true
     phony: true
-    variables:
-      - name: IMAGE_SIGNER_RELEASE
-        defaultValue: v0.2.0
     script:
       - |
-        @curl -sSL https://github.com/siderolabs/go-tools/releases/download/$(IMAGE_SIGNER_RELEASE)/image-signer-$(OPERATING_SYSTEM)-$(GOARCH) -o $(ARTIFACTS)/image-signer
+        @curl -sSL https://github.com/siderolabs/go-tools/releases/download/$(GO_TOOLS_RELEASE)/image-signer-$(OPERATING_SYSTEM)-$(GOARCH) -o $(ARTIFACTS)/image-signer
         @chmod +x $(ARTIFACTS)/image-signer
 ---
 kind: custom.Step

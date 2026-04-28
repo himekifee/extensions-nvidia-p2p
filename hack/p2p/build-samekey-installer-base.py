@@ -433,23 +433,23 @@ def managed_work_dir() -> Iterator[Path]:
 
 def main() -> None:
     stock_installer_image = os.environ.get(
-        "STOCK_INSTALLER_BASE_IMAGE", "ghcr.io/siderolabs/installer-base:v1.13.0-beta.1"
+        "STOCK_INSTALLER_BASE_IMAGE", "ghcr.io/siderolabs/installer-base:v1.13.0"
     )
     source_installer_image = os.environ.get("SOURCE_INSTALLER_IMAGE", "").strip()
-    imager_image = os.environ.get("IMAGER_IMAGE", "ghcr.io/siderolabs/imager:v1.13.0-beta.1")
+    imager_image = os.environ.get("IMAGER_IMAGE", "ghcr.io/siderolabs/imager:v1.13.0")
     samekey_kernel_image = os.environ.get(
         "SAMEKEY_KERNEL_IMAGE",
-        "ghcr.io/<your-org>/extensions-nvidia-p2p/kernel:v1.13.0-beta.1-samekey",
+        "ghcr.io/<your-org>/extensions-nvidia-p2p/kernel:v1.13.0-samekey",
     )
     squashfs_tools_image = os.environ.get(
-        "SQUASHFS_TOOLS_IMAGE", "ghcr.io/siderolabs/squashfs-tools:v1.12.0"
+        "SQUASHFS_TOOLS_IMAGE", "ghcr.io/siderolabs/squashfs-tools:v1.13.0"
     )
-    xz_image = os.environ.get("XZ_IMAGE", "ghcr.io/siderolabs/xz:v1.12.0")
-    zlib_image = os.environ.get("ZLIB_IMAGE", "ghcr.io/siderolabs/zlib:v1.12.0")
-    zstd_image = os.environ.get("ZSTD_IMAGE", "ghcr.io/siderolabs/zstd:v1.12.0")
+    xz_image = os.environ.get("XZ_IMAGE", "ghcr.io/siderolabs/xz:v1.13.0")
+    zlib_image = os.environ.get("ZLIB_IMAGE", "ghcr.io/siderolabs/zlib:v1.13.0")
+    zstd_image = os.environ.get("ZSTD_IMAGE", "ghcr.io/siderolabs/zstd:v1.13.0")
     output_image = os.environ.get(
         "OUTPUT_IMAGE",
-        "ghcr.io/<your-org>/extensions-nvidia-p2p/installer-base:v1.13.0-beta.1-samekey",
+        "ghcr.io/<your-org>/extensions-nvidia-p2p/installer-base:v1.13.0-samekey",
     )
     push_output = os.environ.get("PUSH_OUTPUT", "true").lower() not in {
         "0",

@@ -31,13 +31,13 @@ except ModuleNotFoundError as exc:
 
 
 EXPECTED = {
-    "targetTalosVersion": "v1.13.0-beta.1",
+    "targetTalosVersion": "v1.13.0",
     "targetTalosMinor": "v1.13",
-    "kernelVersion": "6.18.19-talos",
-    "kubernetesVersion": "v1.36.0-beta.0",
+    "kernelVersion": "6.18.24-talos",
+    "kubernetesVersion": "v1.36.0",
     "kubernetesMinor": "v1.36",
     "arch": "amd64",
-    "osImage": "Talos (v1.13.0-beta.1)",
+    "osImage": "Talos (v1.13.0)",
     "selectedTrack": "production",
     "upstreamTag": "595.58.03",
     "upstreamRepository": "https://github.com/NVIDIA/open-gpu-kernel-modules",
@@ -51,15 +51,15 @@ EXPECTED = {
     "donorBranchHeadCommit": "6dd6ba34a4abfb3761797b26102094b856b01edd",
     "donorCompareDiffURL": "https://github.com/aikitoria/open-gpu-kernel-modules/compare/db0c4e65c8e34c678d745ddb1317f53f90d1072b...2b75b4991f506526ff6dbd179d61e5f8797ebb15.diff",
     "openModuleName": "siderolabs/nvidia-open-gpu-kernel-modules-production",
-    "openModuleRef": "ghcr.io/siderolabs/nvidia-open-gpu-kernel-modules-production:595.58.03-v1.13.0-beta.1",
-    "openModuleDigest": "sha256:92961aefa1f61a185cf14b6878b3f5d818f0cc6bd631094cbb07c26cb68c332f",
+    "openModuleRef": "ghcr.io/siderolabs/nvidia-open-gpu-kernel-modules-production:595.58.03-v1.13.0",
+    "openModuleDigest": "sha256:33392e92504a7e9fe81b41460d1e7674d4e8eea87dd2f4d4563c20c68421e4d1",
     "toolkitName": "siderolabs/nvidia-container-toolkit-production",
     "toolkitRef": "ghcr.io/siderolabs/nvidia-container-toolkit-production:595.58.03-v1.19.0",
-    "toolkitDigest": "sha256:95039cbda2db18ec8bb5581eb55737af49be0ca0537df3f9b7db6aa916fcd5c6",
+    "toolkitDigest": "sha256:e36a0bd40827e1b8b68cd99c35b1ce4b9c8d1889e0bba68b7e475f0ebf022699",
     "toolkitTrack": "production",
     "toolkitDriverFamilyBranch": "595",
     "toolkitSourceRepository": "https://github.com/siderolabs/extensions",
-    "rollbackInstaller": "factory.talos.dev/installer/383ff20982d317df4085095c792d4927aa9cc88c56d7f67242f8c91d8e6b3142:v1.12.6",
+    "rollbackInstaller": "factory.talos.dev/installer/383ff20982d317df4085095c792d4927aa9cc88c56d7f67242f8c91d8e6b3142:v1.12.7",
     "repositoryUpstream": "siderolabs/extensions",
 }
 
